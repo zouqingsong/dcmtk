@@ -3226,7 +3226,9 @@ OFStandard::OFGroup::operator OFBool() const { return ok; }
 OFStandard::OFPasswd::OFPasswd()
 : pw_name()
 , pw_passwd()
+#ifdef HAVE_PASSWD_GECOS
 , pw_gecos()
+#endif
 , pw_dir()
 , pw_shell()
 , pw_uid()
@@ -3238,7 +3240,9 @@ OFStandard::OFPasswd::OFPasswd()
 OFStandard::OFPasswd::OFPasswd( passwd* const p )
 : pw_name()
 , pw_passwd()
+#ifdef HAVE_PASSWD_GECOS
 , pw_gecos()
+#endif
 , pw_dir()
 , pw_shell()
 , pw_uid()
