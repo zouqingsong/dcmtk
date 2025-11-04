@@ -1,5 +1,5 @@
-#ifndef DCMTK_WRAPPER_H
-#define DCMTK_WRAPPER_H
+#ifndef DCMTK_FLUTTER_WRAPPER_H
+#define DCMTK_FLUTTER_WRAPPER_H
 
 #ifdef __cplusplus
 extern "C" {
@@ -13,4 +13,4 @@ void dcmtk_free_string(const char* str);
 }
 #endif
 
-#endif // DCMTK_WRAPPER_H
+#endif // DCMTK_FLUTTER_WRAPPER_H

@@ -1,8 +1,10 @@
-#import "dcmtk_wrapper.h"
+#include "dcmtk_flutter_wrapper.h"
 #include <dcmtk/dcmdata/dctk.h>
 #include <dcmtk/dcmdata/dcfilefo.h>
 #include <string>
 #include <sstream>
+#include <cstring>
+#include <cstdlib>
 
 extern "C" {
 

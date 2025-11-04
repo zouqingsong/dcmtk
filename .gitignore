@@ -110,8 +110,12 @@ dcmwlm/apps/wlmscpfs
 dcmwlm/tests/wltest
 oficonv/apps/mkcsmapper
 oficonv/apps/mkesdb
-/build_mobile/android/arm64-v8a
-/build_mobile/android/armeabi-v7a
-/build_mobile/android/x86_64
-/build_mobile/ios/OS
-/build_mobile/ios/SIMULATOR
+/build_mobile/android
+/build_mobile/ios
+
+/flutter_plugin/.dart_tool
+/flutter_plugin/example/.dart_tool
+/flutter_plugin/example/build
+/flutter_plugin/example/ios/Pods
+/flutter_plugin/example/ios/.symlinks
+/flutter_plugin/example/ios/Flutter/.last_build_id

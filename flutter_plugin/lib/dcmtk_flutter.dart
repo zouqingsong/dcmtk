@@ -1,8 +1,9 @@
 import 'dart:ffi';
 import 'dart:io';
 import 'package:ffi/ffi.dart';
+import 'package:flutter/services.dart';
 
-// Native function signatures
+// Native function signatures (for Android FFI)
 typedef _LoadDicomFileNative = Pointer<Utf8> Function(Pointer<Utf8> filePath);
 typedef _LoadDicomFile = Pointer<Utf8> Function(Pointer<Utf8> filePath);
 
@@ -11,20 +12,30 @@ typedef _FreeString = void Function(Pointer<Utf8> str);
 
 class DcmtkFlutter {
   static DcmtkFlutter? _instance;
-  late DynamicLibrary _dylib;
+  late DynamicLibrary? _dylib;
   
-  // Function pointers
-  late _LoadDicomFile _loadDicomFile;
-  late _FreeString _freeString;
+  // Function pointers (for Android FFI)
+  late _LoadDicomFile? _loadDicomFile;
+  late _FreeString? _freeString;
+  
+  // Method channel (for iOS)
+  static const MethodChannel _methodChannel = MethodChannel('dcmtk_flutter');
 
   DcmtkFlutter._internal() {
-    _dylib = _loadLibrary();
-    _loadDicomFile = _dylib
-        .lookup<NativeFunction<_LoadDicomFileNative>>('dcmtk_load_dicom_file')
-        .asFunction();
-    _freeString = _dylib
-        .lookup<NativeFunction<_FreeStringNative>>('dcmtk_free_string')
-        .asFunction();
+    if (Platform.isAndroid) {
+      _dylib = _loadLibrary();
+      _loadDicomFile = _dylib!
+          .lookup<NativeFunction<_LoadDicomFileNative>>('dcmtk_load_dicom_file')
+          .asFunction();
+      _freeString = _dylib!
+          .lookup<NativeFunction<_FreeStringNative>>('dcmtk_free_string')
+          .asFunction();
+    } else if (Platform.isIOS) {
+      // iOS uses MethodChannel instead of FFI
+      _dylib = null;
+      _loadDicomFile = null;
+      _freeString = null;
+    }
   }
 
   factory DcmtkFlutter() {
@@ -32,46 +43,40 @@ class DcmtkFlutter {
     return _instance!;
   }
 
-  DynamicLibrary _loadLibrary() {
+  DynamicLibrary? _loadLibrary() {
     if (Platform.isAndroid) {
       return DynamicLibrary.open('libdcmtk_flutter.so');
-    } else if (Platform.isIOS) {
-      return DynamicLibrary.process();
-    } else {
-      throw UnsupportedError('Platform not supported');
     }
+    return null;
   }
 
   /// Load and parse a DICOM file
-  /// Returns JSON string with DICOM file information
+  /// Returns string with DICOM file information
   Future<String> loadDicomFile(String filePath) async {
-    final filePathPtr = filePath.toNativeUtf8();
-    
-    try {
-      final resultPtr = _loadDicomFile(filePathPtr);
-      
-      if (resultPtr == nullptr) {
-        throw Exception('Failed to load DICOM file: $filePath');
+    if (Platform.isIOS) {
+      // Use MethodChannel for iOS
+      try {
+        final String result = await _methodChannel.invokeMethod('loadDicomFile', {
+          'filePath': filePath,
+        });
+        return result;
+      } on PlatformException catch (e) {
+        return "Error: ${e.message}";
       }
+    } else if (Platform.isAndroid) {
+      // Use FFI for Android
+      final filePathPtr = filePath.toNativeUtf8();
       
-      final result = resultPtr.toDartString();
-      _freeString(resultPtr);
-      
-      return result;
-    } finally {
-      malloc.free(filePathPtr);
+      try {
+        final resultPtr = _loadDicomFile!(filePathPtr);
+        final result = resultPtr.toDartString();
+        _freeString!(resultPtr);
+        return result;
+      } finally {
+        malloc.free(filePathPtr);
+      }
+    } else {
+      return "Error: Unsupported platform";
     }
-  }
-
-  /// Get DICOM tag value from a loaded file
-  Future<String?> getDicomTag(String filePath, String tagName) async {
-    // This would be implemented with additional native functions
-    throw UnimplementedError('Not yet implemented');
-  }
-
-  /// Convert DICOM to image format
-  Future<List<int>?> convertToImage(String filePath, String format) async {
-    // This would be implemented with additional native functions
-    throw UnimplementedError('Not yet implemented');
   }
 }
