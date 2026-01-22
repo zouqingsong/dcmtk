@@ -66,8 +66,8 @@ for i in "${!IOS_PLATFORMS[@]}"; do
     echo "Completed build for $PLATFORM"
 done
 
-# Create universal libraries using lipo
-echo "Creating universal libraries..."
+# Skip universal binary creation since both device and simulator are arm64
+echo "Skipping universal binary creation (both device and simulator are arm64)"
 
 PLUGIN_FRAMEWORK_DIR="$PROJECT_ROOT/flutter_plugin/ios/Frameworks"
 mkdir -p "$PLUGIN_FRAMEWORK_DIR"
@@ -76,38 +76,126 @@ mkdir -p "$PLUGIN_FRAMEWORK_DIR"
 DEVICE_LIB_DIR="${DEVICE_LIBS[0]}"
 SIMULATOR_LIB_DIR="${SIMULATOR_LIBS[0]}"
 
-# Create universal binaries for each library
-for lib_file in "$DEVICE_LIB_DIR"/*.a; do
-    lib_name=$(basename "$lib_file")
-    simulator_lib="$SIMULATOR_LIB_DIR/$lib_name"
-    
-    if [ -f "$simulator_lib" ]; then
-        echo "Creating universal binary for $lib_name"
-        lipo -create "$lib_file" "$simulator_lib" -output "$COMBINED_LIB_DIR/$lib_name"
+# Build the Flutter wrapper
+echo "Building Flutter wrapper..."
+WRAPPER_DIR="$PROJECT_ROOT/flutter_plugin/ios_wrapper"
+WRAPPER_SRC="$WRAPPER_DIR/dcmtk_flutter_wrapper.cpp"
+WRAPPER_OBJ_DIR="$BUILD_DIR/wrapper_obj"
+mkdir -p "$WRAPPER_OBJ_DIR"
+
+# Build for each architecture
+for PLATFORM in "OS" "SIMULATOR64"; do
+    # Map SIMULATOR64 to SIMULATOR for directory paths
+    if [ "$PLATFORM" == "SIMULATOR64" ]; then
+        BUILD_PLATFORM="SIMULATOR"
     else
-        echo "Warning: $lib_name not found in simulator build, copying device version only"
-        cp "$lib_file" "$COMBINED_LIB_DIR/$lib_name"
+        BUILD_PLATFORM="$PLATFORM"
     fi
+    
+    ARCH_BUILD_DIR="$BUILD_DIR/$BUILD_PLATFORM"
+    
+    if [ "$PLATFORM" == "OS" ]; then
+        SDK="iphoneos"
+        ARCH_FLAGS="-arch arm64"
+    else
+        SDK="iphonesimulator"
+        ARCH_FLAGS="-arch arm64"  # Only arm64 for Apple Silicon Macs
+    fi
+    
+    WRAPPER_OBJ="$WRAPPER_OBJ_DIR/dcmtk_flutter_wrapper_${PLATFORM}.o"
+    
+    # Set minimum OS version flag based on platform
+    if [ "$PLATFORM" == "OS" ]; then
+        MIN_OS_FLAG="-mios-version-min=11.0"
+    else
+        MIN_OS_FLAG="-mios-simulator-version-min=11.0"
+    fi
+    
+    echo "Compiling wrapper for $PLATFORM..."
+    echo "SDK: $SDK, Min OS flag: $MIN_OS_FLAG"
+    
+    xcrun clang++ \
+        -x c++ \
+        -std=c++11 \
+        -stdlib=libc++ \
+        $ARCH_FLAGS \
+        -isysroot $(xcrun --sdk $SDK --show-sdk-path) \
+        $MIN_OS_FLAG \
+        -I"$ARCH_BUILD_DIR/config/include" \
+        -I"$PROJECT_ROOT/ofstd/include" \
+        -I"$PROJECT_ROOT/oflog/include" \
+        -I"$PROJECT_ROOT/dcmdata/include" \
+        -I"$WRAPPER_DIR" \
+        -DHAVE_CONFIG_H \
+        -c "$WRAPPER_SRC" \
+        -o "$WRAPPER_OBJ"
+    
+    # Create a static library from the object file
+    WRAPPER_LIB="$WRAPPER_OBJ_DIR/libdcmtk_flutter_wrapper_${PLATFORM}.a"
+    libtool -static -o "$WRAPPER_LIB" "$WRAPPER_OBJ"
 done
 
-# Create a single combined library using libtool (proper way for macOS)
-echo "Creating combined DCMTK library..."
-cd "$COMBINED_LIB_DIR"
+# Create separate device and simulator libraries
+echo "Creating device library..."
+DEVICE_LIB_DIR="$BUILD_DIR/device_lib"
+DEVICE_OBJ_DIR="$BUILD_DIR/device_obj"
+rm -rf "$DEVICE_LIB_DIR" "$DEVICE_OBJ_DIR"
+mkdir -p "$DEVICE_LIB_DIR" "$DEVICE_OBJ_DIR"
 
-# Collect all library files
-LIB_FILES=()
-for lib_file in *.a; do
-    if [ -f "$lib_file" ]; then
-        LIB_FILES+=("$lib_file")
-    fi
+# Extract all object files from device libraries
+cd "$DEVICE_OBJ_DIR"
+for lib in "$BUILD_DIR/OS/install/lib"/*.a; do
+    echo "Extracting $(basename $lib)..."
+    ar -x "$lib"
+done
+# Extract wrapper (it's already thin arm64, not a fat archive)
+ar -x "$WRAPPER_OBJ_DIR/libdcmtk_flutter_wrapper_OS.a"
+
+# Create combined device library
+echo "Combining device objects..."
+ar -rcs "$DEVICE_LIB_DIR/libdcmtk.a" *.o
+
+echo "Creating simulator library..."
+SIMULATOR_LIB_DIR="$BUILD_DIR/simulator_lib"
+SIMULATOR_OBJ_DIR="$BUILD_DIR/simulator_obj"
+rm -rf "$SIMULATOR_LIB_DIR" "$SIMULATOR_OBJ_DIR"
+mkdir -p "$SIMULATOR_LIB_DIR" "$SIMULATOR_OBJ_DIR"
+
+# Extract all object files from simulator libraries (arm64 only for Apple Silicon)
+cd "$SIMULATOR_OBJ_DIR"
+for lib in "$BUILD_DIR/SIMULATOR/install/lib"/*.a; do
+    echo "Extracting $(basename $lib)..."
+    ar -x "$lib"
 done
 
-# Use libtool to combine all static libraries into one
-echo "Combining ${#LIB_FILES[@]} libraries using libtool..."
-libtool -static -o "$PLUGIN_FRAMEWORK_DIR/libdcmtk.a" "${LIB_FILES[@]}"
+# Extract wrapper (already arm64-only, no need for lipo)
+ar -x "$WRAPPER_OBJ_DIR/libdcmtk_flutter_wrapper_SIMULATOR64.a"
+
+# Create combined simulator library
+echo "Combining simulator objects..."
+ar -rcs "$SIMULATOR_LIB_DIR/libdcmtk.a" *.o
+
+# Create XCFramework
+echo "Creating XCFramework..."
+XCFRAMEWORK_DIR="$PLUGIN_FRAMEWORK_DIR"
+rm -rf "$XCFRAMEWORK_DIR/dcmtk.xcframework"
+
+xcodebuild -create-xcframework \
+    -library "$DEVICE_LIB_DIR/libdcmtk.a" \
+    -library "$SIMULATOR_LIB_DIR/libdcmtk.a" \
+    -output "$XCFRAMEWORK_DIR/dcmtk.xcframework"
 
 echo "iOS build completed successfully!"
-echo "Universal library is available at: $PLUGIN_FRAMEWORK_DIR/libdcmtk.a"
+echo "XCFramework is available at: $XCFRAMEWORK_DIR/dcmtk.xcframework"
+echo ""
+echo "Device library size: $(du -h $DEVICE_LIB_DIR/libdcmtk.a | cut -f1)"
+echo "Simulator library size: $(du -h $SIMULATOR_LIB_DIR/libdcmtk.a | cut -f1)"
+
+# Also create a legacy universal library for backwards compatibility (simulator-only for testing)
+echo ""
+echo "Creating legacy simulator-only library for testing..."
+cp "$SIMULATOR_LIB_DIR/libdcmtk.a" "$PLUGIN_FRAMEWORK_DIR/libdcmtk.a"
+echo "Legacy library (simulator-only) is available at: $PLUGIN_FRAMEWORK_DIR/libdcmtk.a"
 
 # Copy headers
 echo "Copying headers..."

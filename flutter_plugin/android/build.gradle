@@ -1,6 +1,39 @@
+group 'com.dcmtk.flutter'
+version '1.0-SNAPSHOT'
+
+buildscript {
+    ext.kotlin_version = '2.1.0'
+    repositories {
+        google()
+        mavenCentral()
+    }
+
+    dependencies {
+        classpath 'com.android.tools.build:gradle:8.7.3'
+        classpath "org.jetbrains.kotlin:kotlin-gradle-plugin:$kotlin_version"
+    }
+}
+
+rootProject.allprojects {
+    repositories {
+        google()
+        mavenCentral()
+    }
+}
+
+apply plugin: 'com.android.library'
+apply plugin: 'kotlin-android'
+
 android {
     namespace 'com.dcmtk.flutter'
-    compileSdkVersion flutter.compileSdkVersion
+    
+    // Use new compileSdk instead of compileSdkVersion
+    if (project.android.hasProperty("namespace")) {
+        compileSdk flutter.compileSdkVersion ?: 34
+    } else {
+        compileSdkVersion flutter.compileSdkVersion ?: 34
+    }
+    
     ndkVersion flutter.ndkVersion
 
     compileOptions {
@@ -8,9 +41,12 @@ android {
         targetCompatibility JavaVersion.VERSION_1_8
     }
 
+    kotlinOptions {
+        jvmTarget = '1.8'
+    }
+
     defaultConfig {
-        minSdkVersion flutter.minSdkVersion
-        targetSdkVersion flutter.targetSdkVersion
+        minSdkVersion flutter.minSdkVersion ?: 28
         ndk {
             abiFilters 'arm64-v8a', 'armeabi-v7a', 'x86_64'
         }
@@ -25,4 +61,8 @@ android {
 
 flutter {
     source '../..'
+}
+
+dependencies {
+    implementation "org.jetbrains.kotlin:kotlin-stdlib-jdk7:$kotlin_version"
 }
