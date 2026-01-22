@@ -44,10 +44,10 @@
 /* #undef C_RIGHTSHIFT_UNSIGNED */
 
 /* Define the DCMTK default path */
-#define DCMTK_PREFIX "/Users/qingsong/Documents/GitHub/dcmtk/build_mobile/ios/OS/install"
+#define DCMTK_PREFIX "/Users/Qing-song.Zou/Documents/GitHub/dcmtk/build_mobile/ios/OS/install"
 
 /* Define the default data dictionary path for the dcmdata library package */
-#define DCM_DICT_DEFAULT_PATH "/Users/qingsong/Documents/GitHub/dcmtk/build_mobile/ios/OS/install/share/dcmtk-3.6.9-DEV/dicom.dic"
+#define DCM_DICT_DEFAULT_PATH "/Users/Qing-song.Zou/Documents/GitHub/dcmtk/build_mobile/ios/OS/install/share/dcmtk-3.6.9-DEV/dicom.dic"
 
 /* Define the type of standard dictionary that we want to use:
    0 - Do not load any default dictionary on startup
@@ -412,10 +412,10 @@
 #define PACKAGE_STRING ""
 
 /* Define to the default configuration directory (used by some applications) */
-#define DEFAULT_CONFIGURATION_DIR "/Users/qingsong/Documents/GitHub/dcmtk/build_mobile/ios/OS/install/etc/dcmtk-3.6.9-DEV/"
+#define DEFAULT_CONFIGURATION_DIR "/Users/Qing-song.Zou/Documents/GitHub/dcmtk/build_mobile/ios/OS/install/etc/dcmtk-3.6.9-DEV/"
 
 /* Define to the default support data directory (used by some applications) */
-#define DEFAULT_SUPPORT_DATA_DIR "/Users/qingsong/Documents/GitHub/dcmtk/build_mobile/ios/OS/install/share/dcmtk-3.6.9-DEV/"
+#define DEFAULT_SUPPORT_DATA_DIR "/Users/Qing-song.Zou/Documents/GitHub/dcmtk/build_mobile/ios/OS/install/share/dcmtk-3.6.9-DEV/"
 
 /* Define to the one symbol short name of this package. */
 /* #undef PACKAGE_TARNAME */

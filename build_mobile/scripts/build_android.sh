@@ -38,6 +38,12 @@ for ABI in "${ANDROID_ABIS[@]}"; do
         -DANDROID_NDK="$ANDROID_NDK_ROOT" \
         -DCMAKE_BUILD_TYPE=Release \
         -DCMAKE_INSTALL_PREFIX="$ABI_BUILD_DIR/install" \
+        -DANDROID_EMULATOR_PROGRAM="$ANDROID_SDK_ROOT/emulator/emulator" \
+        -DANDROID_ANDROID_PROGRAM="/tmp/android_dummy.sh" \
+        -DANDROID_ADB_PROGRAM="$ANDROID_SDK_ROOT/platform-tools/adb" \
+        -DDCMTK_FORCE_FPIC_ON_UNIX=ON \
+        -DCMAKE_CROSSCOMPILING_EMULATOR="" \
+        -Wno-dev \
         "$PROJECT_ROOT"
     
     # Build the libraries

@@ -115,3 +115,5 @@ oficonv/apps/mkesdb
 /build_mobile/android/x86_64
 /build_mobile/ios/OS
 /build_mobile/ios/SIMULATOR
+/flutter_plugin/example/.dart_tool
+/flutter_plugin/.dart_tool
