@@ -36,9 +36,9 @@ PODS:
     - DKImagePickerController/PhotoGallery
     - Flutter
   - Flutter (1.0.0)
-  - SDWebImage (5.21.1):
-    - SDWebImage/Core (= 5.21.1)
-  - SDWebImage/Core (5.21.1)
+  - SDWebImage (5.21.5):
+    - SDWebImage/Core (= 5.21.5)
+  - SDWebImage/Core (5.21.5)
   - SwiftyGif (5.4.5)
 
 DEPENDENCIES:
@@ -62,12 +62,12 @@ EXTERNAL SOURCES:
     :path: Flutter
 
 SPEC CHECKSUMS:
-  dcmtk_flutter: 31b481f738d54179d74873d60427c592c936edc1
+  dcmtk_flutter: f6b529f181bf1314db190b44b87f6bef2625b707
   DKImagePickerController: 946cec48c7873164274ecc4624d19e3da4c1ef3c
   DKPhotoGallery: b3834fecb755ee09a593d7c9e389d8b5d6deed60
   file_picker: a0560bc09d61de87f12d246fc47d2119e6ef37be
   Flutter: e0871f40cf51350855a761d2e70bf5af5b9b5de7
-  SDWebImage: f29024626962457f3470184232766516dee8dfea
+  SDWebImage: e9c98383c7572d713c1a0d7dd2783b10599b9838
   SwiftyGif: 706c60cf65fa2bc5ee0313beece843c8eb8194d4
 
 PODFILE CHECKSUM: 03a7c553cbb2805665109d0ff9952c4669a16231

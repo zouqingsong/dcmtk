@@ -9,7 +9,9 @@ DCMTK (DICOM toolkit) Flutter plugin providing access to DICOM file processing c
   s.license          = { :file => '../LICENSE' }
   s.author           = { 'Your Company' => 'email@example.com' }
   s.source           = { :path => '.' }
-  s.source_files = 'Classes/**/*'
+  # Include Objective-C and C/C++ sources from ios/native/ directory
+  s.source_files = 'Classes/**/*', 'native/dcmtk_flutter_wrapper.h', 'native/dcmtk_flutter_wrapper.cpp'
+  s.public_header_files = 'Classes/**/*.h', 'native/dcmtk_flutter_wrapper.h'
   s.dependency 'Flutter'
   s.platform = :ios, '11.0'
   s.ios.deployment_target = '11.0'
@@ -26,7 +28,8 @@ DCMTK (DICOM toolkit) Flutter plugin providing access to DICOM file processing c
     'DEFINES_MODULE' => 'YES',
     'EXCLUDED_ARCHS[sdk=iphonesimulator*]' => 'i386 x86_64',
     'CLANG_CXX_LANGUAGE_STANDARD' => 'c++11',
-    'CLANG_CXX_LIBRARY' => 'libc++'
+    'CLANG_CXX_LIBRARY' => 'libc++',
+    'HEADER_SEARCH_PATHS' => '$(inherited) "${PODS_TARGET_SRCROOT}/Frameworks/Headers"'
   }
   s.swift_version = '5.0'
 end
