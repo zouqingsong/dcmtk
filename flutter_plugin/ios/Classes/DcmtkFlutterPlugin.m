@@ -33,6 +33,54 @@ extern "C" {
         int error;
         char* error_message;
     } DicomQueryResult;
+
+    typedef struct {
+      char* study_instance_uid;
+      char* study_date;
+      char* study_time;
+      char* study_description;
+      char* accession_number;
+      int series_count;
+    } DicomStudy;
+
+    typedef struct {
+      DicomStudy* studies;
+      int study_count;
+      int error;
+      char* error_message;
+    } DicomStudyQueryResult;
+    
+    typedef struct {
+        char* series_instance_uid;
+        char* series_number;
+        char* series_description;
+        char* modality;
+        char* series_date;
+        char* series_time;
+        int instance_count;
+    } DicomSeries;
+    
+    typedef struct {
+        DicomSeries* series;
+        int series_count;
+        int error;
+        char* error_message;
+    } DicomSeriesQueryResult;
+    
+    typedef struct {
+        char* sop_instance_uid;
+        char* instance_number;
+        char* file_path;
+        char* content_type;
+        int file_size;
+    } DicomInstance;
+    
+    typedef struct {
+        DicomInstance* instances;
+        int instance_count;
+        int error;
+        char* error_message;
+    } DicomInstanceQueryResult;
     
     typedef struct {
         char* patient_id;
@@ -58,10 +106,16 @@ extern "C" {
     
     int dcmtk_test_server_connection(const char* server_host, int server_port, const char* ae_title, const char* called_ae_title);
     DicomQueryResult* dcmtk_query_patients(const char* server_host, int server_port, const char* ae_title, const char* called_ae_title);
-    DicomQueryResult* dcmtk_query_studies_for_patient(const char* server_host, int server_port, const char* ae_title, const char* called_ae_title, const char* patient_id);
+    DicomStudyQueryResult* dcmtk_query_studies_for_patient(const char* server_host, int server_port, const char* ae_title, const char* called_ae_title, const char* patient_id);
+    DicomSeriesQueryResult* dcmtk_query_series_for_study(const char* server_host, int server_port, const char* ae_title, const char* called_ae_title, const char* study_instance_uid);
     PatientCreationResult* dcmtk_create_patient(const char* server_host, int server_port, const char* ae_title, const char* called_ae_title, PatientInfo* patient_info);
-    MediaUploadResult* dcmtk_upload_image(const char* server_host, int server_port, const char* ae_title, const char* called_ae_title, const char* patient_id, const char* image_path, const char* study_description);
+    MediaUploadResult* dcmtk_upload_image(const char* server_host, int server_port, const char* ae_title, const char* called_ae_title, const char* patient_id, const char* image_path, const char* study_description, const char* series_description, const char* image_comments, const char* modality);
+    MediaUploadResult* dcmtk_upload_video(const char* server_host, int server_port, const char* ae_title, const char* called_ae_title, const char* patient_id, const char* video_path, const char* study_description, const char* series_description, const char* image_comments, const char* modality);
     void dcmtk_free_query_result(DicomQueryResult* result);
+    void dcmtk_free_study_query_result(DicomStudyQueryResult* result);
+    void dcmtk_free_series_query_result(DicomSeriesQueryResult* result);
+    DicomInstanceQueryResult* dcmtk_download_instances(const char* server_host, int server_port, const char* ae_title, const char* called_ae_title, const char* series_instance_uid, const char* local_storage_path);
+    void dcmtk_free_instance_query_result(DicomInstanceQueryResult* result);
     void dcmtk_free_patient_creation_result(PatientCreationResult* result);
     void dcmtk_free_media_upload_result(MediaUploadResult* result);
 #ifdef __cplusplus
@@ -220,21 +274,34 @@ extern "C" {
     const char* cCalledAeTitle = [calledAeTitle UTF8String];
     const char* cPatientId = [patientId UTF8String];
     
-    DicomQueryResult* queryResult = dcmtk_query_studies_for_patient(cServerHost, cServerPort, cAeTitle, cCalledAeTitle, cPatientId);
+    DicomStudyQueryResult* queryResult = dcmtk_query_studies_for_patient(cServerHost, cServerPort, cAeTitle, cCalledAeTitle, cPatientId);
     
     if (queryResult->error) {
       NSString* errorMsg = queryResult->error_message ? 
           [NSString stringWithUTF8String:queryResult->error_message] : @"Unknown query error";
-      dcmtk_free_query_result(queryResult);
+      dcmtk_free_study_query_result(queryResult);
       result([FlutterError errorWithCode:@"QUERY_ERROR"
                                  message:errorMsg
                                  details:nil]);
       return;
     }
-    
-    // For now, return empty array - study parsing to be implemented
-    dcmtk_free_query_result(queryResult);
-    result(@[]);
+
+    NSMutableArray* studiesArray = [NSMutableArray array];
+    for (int i = 0; i < queryResult->study_count; i++) {
+      DicomStudy* study = &queryResult->studies[i];
+      NSDictionary* studyDict = @{
+        @"studyInstanceUID": study->study_instance_uid ? [NSString stringWithUTF8String:study->study_instance_uid] : @"",
+        @"studyDate": study->study_date ? [NSString stringWithUTF8String:study->study_date] : @"",
+        @"studyTime": study->study_time ? [NSString stringWithUTF8String:study->study_time] : @"",
+        @"studyDescription": study->study_description ? [NSString stringWithUTF8String:study->study_description] : @"",
+        @"accessionNumber": study->accession_number ? [NSString stringWithUTF8String:study->accession_number] : @"",
+        @"seriesCount": @(study->series_count)
+      };
+      [studiesArray addObject:studyDict];
+    }
+
+    dcmtk_free_study_query_result(queryResult);
+    result(studiesArray);
     
   } else if ([@"querySeriesForStudy" isEqualToString:call.method]) {
     NSString* serverHost = call.arguments[@"serverHost"];
@@ -268,9 +335,73 @@ extern "C" {
       return;
     }
     
-    // For now, return empty array - series parsing to be implemented
+    NSMutableArray* seriesArray = [NSMutableArray array];
+    for (int i = 0; i < seriesResult->series_count; i++) {
+      DicomSeries* series = &seriesResult->series[i];
+      NSDictionary* seriesDict = @{
+        @"seriesInstanceUID": series->series_instance_uid ? [NSString stringWithUTF8String:series->series_instance_uid] : @"",
+        @"seriesNumber": series->series_number ? [NSString stringWithUTF8String:series->series_number] : @"",
+        @"seriesDescription": series->series_description ? [NSString stringWithUTF8String:series->series_description] : @"",
+        @"modality": series->modality ? [NSString stringWithUTF8String:series->modality] : @"",
+        @"seriesDate": series->series_date ? [NSString stringWithUTF8String:series->series_date] : @"",
+        @"seriesTime": series->series_time ? [NSString stringWithUTF8String:series->series_time] : @"",
+        @"instanceCount": @(series->instance_count)
+      };
+      [seriesArray addObject:seriesDict];
+    }
+
     dcmtk_free_series_query_result(seriesResult);
-    result(@[]);
+    result(seriesArray);
+
+  } else if ([@"downloadInstancesViaCMove" isEqualToString:call.method]) {
+    NSString* serverHost = call.arguments[@"serverHost"];
+    NSNumber* serverPort = call.arguments[@"serverPort"];
+    NSString* aeTitle = call.arguments[@"aeTitle"];
+    NSString* calledAeTitle = call.arguments[@"calledAeTitle"];
+    NSString* seriesInstanceUID = call.arguments[@"seriesInstanceUID"];
+    NSString* localStoragePath = call.arguments[@"localStoragePath"];
+    
+    if (serverHost == nil || serverPort == nil || aeTitle == nil || calledAeTitle == nil || seriesInstanceUID == nil || localStoragePath == nil) {
+      result([FlutterError errorWithCode:@"INVALID_ARGUMENT"
+                                 message:@"Server host, port, AE title, called AE title, series instance UID, and local storage path are required"
+                                 details:nil]);
+      return;
+    }
+    
+    const char* cServerHost = [serverHost UTF8String];
+    int cServerPort = [serverPort intValue];
+    const char* cAeTitle = [aeTitle UTF8String];
+    const char* cCalledAeTitle = [calledAeTitle UTF8String];
+    const char* cSeriesInstanceUID = [seriesInstanceUID UTF8String];
+    const char* cLocalStoragePath = [localStoragePath UTF8String];
+    
+    DicomInstanceQueryResult* instanceResult = dcmtk_download_instances(cServerHost, cServerPort, cAeTitle, cCalledAeTitle, cSeriesInstanceUID, cLocalStoragePath);
+    
+    if (instanceResult->error) {
+      NSString* errorMsg = instanceResult->error_message ? 
+          [NSString stringWithUTF8String:instanceResult->error_message] : @"Unknown C-MOVE download error";
+      dcmtk_free_instance_query_result(instanceResult);
+      result([FlutterError errorWithCode:@"DOWNLOAD_ERROR"
+                                 message:errorMsg
+                                 details:nil]);
+      return;
+    }
+    
+    NSMutableArray* instanceArray = [NSMutableArray array];
+    for (int i = 0; i < instanceResult->instance_count; i++) {
+      DicomInstance* instance = &instanceResult->instances[i];
+      NSDictionary* instanceDict = @{
+        @"sopInstanceUID": instance->sop_instance_uid ? [NSString stringWithUTF8String:instance->sop_instance_uid] : @"",
+        @"instanceNumber": instance->instance_number ? [NSString stringWithUTF8String:instance->instance_number] : @"",
+        @"filePath": instance->file_path ? [NSString stringWithUTF8String:instance->file_path] : @"",
+        @"contentType": instance->content_type ? [NSString stringWithUTF8String:instance->content_type] : @"IMAGE",
+        @"fileSize": @(instance->file_size)
+      };
+      [instanceArray addObject:instanceDict];
+    }
+
+    dcmtk_free_instance_query_result(instanceResult);
+    result(instanceArray);
     
   } else if ([@"createPatient" isEqualToString:call.method]) {
     printf("[iOS] createPatient method called\\n");

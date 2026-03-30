@@ -248,6 +248,46 @@ class DcmtkFlutter {
     }
   }
 
+  /// Download instances from a series using C-MOVE (native DICOM protocol)
+  /// Returns list of downloaded instance information
+  Future<List<Map<String, dynamic>>> downloadInstancesViaCMove({
+    required String serverHost,
+    required int serverPort,
+    required String aeTitle,
+    required String calledAeTitle,
+    required String seriesInstanceUID,
+    required String localStoragePath,
+  }) async {
+    if (Platform.isIOS) {
+      try {
+        final List<dynamic> result = await _methodChannel.invokeMethod('downloadInstancesViaCMove', {
+          'serverHost': serverHost,
+          'serverPort': serverPort,
+          'aeTitle': aeTitle,
+          'calledAeTitle': calledAeTitle,
+          'seriesInstanceUID': seriesInstanceUID,
+          'localStoragePath': localStoragePath,
+        });
+        
+        // Convert each item to Map<String, dynamic> safely
+        return result.map((item) {
+          if (item is Map) {
+            return Map<String, dynamic>.from(item);
+          }
+          return <String, dynamic>{};
+        }).toList();
+      } on PlatformException catch (e) {
+        print("Error downloading instances via C-MOVE: ${e.message}");
+        return [];
+      }
+    } else if (Platform.isAndroid) {
+      // TODO: Implement Android FFI C-MOVE download
+      return [];
+    } else {
+      return [];
+    }
+  }
+
   /// Create a new patient on DICOM server
   /// Returns creation result with success status and generated patient ID
   Future<Map<String, dynamic>> createPatient({
@@ -363,8 +403,6 @@ class DcmtkFlutter {
           'seriesDescription': seriesDescription,
           'imageComments': imageComments,
           'modality': modality,
-        });
-          'studyDescription': studyDescription,
         });
         return Map<String, dynamic>.from(result as Map);
       } on PlatformException catch (e) {

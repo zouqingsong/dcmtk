@@ -60,6 +60,13 @@ typedef struct {
 } DicomQueryResult;
 
 typedef struct {
+    DicomStudy* studies;
+    int study_count;
+    int error;
+    char* error_message;
+} DicomStudyQueryResult;
+
+typedef struct {
     char* series_instance_uid;
     char* series_number;
     char* series_description;
@@ -118,7 +125,7 @@ typedef struct {
 // Server connection and query functions
 int dcmtk_test_server_connection(const char* server_host, int server_port, const char* ae_title, const char* called_ae_title);
 DicomQueryResult* dcmtk_query_patients(const char* server_host, int server_port, const char* ae_title, const char* called_ae_title);
-DicomQueryResult* dcmtk_query_studies_for_patient(const char* server_host, int server_port, const char* ae_title, const char* called_ae_title, const char* patient_id);
+DicomStudyQueryResult* dcmtk_query_studies_for_patient(const char* server_host, int server_port, const char* ae_title, const char* called_ae_title, const char* patient_id);
 
 // Extended query functions
 DicomSeriesQueryResult* dcmtk_query_series_for_study(const char* server_host, int server_port, const char* ae_title, const char* called_ae_title, const char* study_instance_uid);
@@ -136,6 +143,7 @@ DicomInstanceQueryResult* dcmtk_download_instances(const char* server_host, int 
 
 // Memory cleanup functions
 void dcmtk_free_query_result(DicomQueryResult* result);
+void dcmtk_free_study_query_result(DicomStudyQueryResult* result);
 void dcmtk_free_series_query_result(DicomSeriesQueryResult* result);
 void dcmtk_free_instance_query_result(DicomInstanceQueryResult* result);
 void dcmtk_free_patient_creation_result(PatientCreationResult* result);

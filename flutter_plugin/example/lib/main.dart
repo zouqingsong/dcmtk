@@ -1,9 +1,12 @@
 import 'dart:async';
+import 'dart:convert';
+import 'dart:io';
 import 'dart:typed_data';
 import 'dart:ui' as ui;
 import 'package:flutter/material.dart';
 import 'package:dcmtk_flutter/dcmtk_flutter.dart';
 import 'package:file_picker/file_picker.dart';
+import 'package:path_provider/path_provider.dart';
 
 void main() {
   runApp(const MyApp());
@@ -34,6 +37,12 @@ class MyHomePage extends StatefulWidget {
 }
 
 class _MyHomePageState extends State<MyHomePage> with TickerProviderStateMixin {
+  static const int _tabFiles = 0;
+  static const int _tabExplorer = 1;
+  static const int _tabServer = 2;
+  static const int _tabPatients = 3;
+  static const int _tabMedia = 4;
+
   final DcmtkFlutter _dcmtk = DcmtkFlutter();
   String _result = 'No DICOM file loaded';
   bool _loading = false;
@@ -46,16 +55,31 @@ class _MyHomePageState extends State<MyHomePage> with TickerProviderStateMixin {
   late TabController _tabController;
   
   // DICOM Server settings
-  final TextEditingController _serverHostController = TextEditingController(text: 'localhost');
+  final TextEditingController _serverHostController = TextEditingController(text: '127.0.0.1');
   final TextEditingController _serverPortController = TextEditingController(text: '4242');
   final TextEditingController _aeTitleController = TextEditingController(text: 'FLUTTER_SCU');
   final TextEditingController _calledAeTitleController = TextEditingController(text: 'ORTHANC');
+  final TextEditingController _httpHostController = TextEditingController(text: '127.0.0.1');
+  final TextEditingController _httpPortController = TextEditingController(text: '8042');
   bool _serverConnected = false;
   List<DicomPatient> _patients = [];
   bool _queryingPatients = false;
+  bool _runningDiagnostics = false;
+  bool _downloadingFromExplorer = false;
+  bool _downloadingViaDicom = false;
+  String _echoStatus = 'Not run';
+  String _findStatus = 'Not run';
+  String _diagnosticsSummary = 'Run preflight to test C-ECHO and C-FIND';
+  String _diagnosticsHint = '';
 
   // Patient management
   DicomPatient? _selectedPatient;
+  DicomStudy? _selectedStudy;
+  DicomSeries? _selectedSeries;
+  List<DicomStudy> _studies = [];
+  List<DicomSeries> _series = [];
+  bool _queryingStudies = false;
+  bool _queryingSeries = false;
   final TextEditingController _newPatientIdController = TextEditingController();
   final TextEditingController _newPatientNameController = TextEditingController();
   final TextEditingController _newPatientBirthDateController = TextEditingController();
@@ -74,7 +98,7 @@ class _MyHomePageState extends State<MyHomePage> with TickerProviderStateMixin {
   @override
   void initState() {
     super.initState();
-    _tabController = TabController(length: 4, vsync: this);  // Updated to 4 tabs
+    _tabController = TabController(length: 5, vsync: this);
   }
 
   @override
@@ -84,6 +108,8 @@ class _MyHomePageState extends State<MyHomePage> with TickerProviderStateMixin {
     _serverPortController.dispose();
     _aeTitleController.dispose();
     _calledAeTitleController.dispose();
+    _httpHostController.dispose();
+    _httpPortController.dispose();
     _newPatientIdController.dispose();
     _newPatientNameController.dispose();
     _newPatientBirthDateController.dispose();
@@ -93,6 +119,15 @@ class _MyHomePageState extends State<MyHomePage> with TickerProviderStateMixin {
     _imageCommentsController.dispose();
     _modalityController.dispose();
     super.dispose();
+  }
+
+  Future<Directory> _getDicomDownloadsDirectory() async {
+    final documentsDir = await getApplicationDocumentsDirectory();
+    final dicomDir = Directory('${documentsDir.path}/DICOM Downloads');
+    if (!await dicomDir.exists()) {
+      await dicomDir.create(recursive: true);
+    }
+    return dicomDir;
   }
 
   Future<void> _pickAndLoadDicomFile() async {
@@ -105,6 +140,14 @@ class _MyHomePageState extends State<MyHomePage> with TickerProviderStateMixin {
       final String filePath = result.files.first.path!;
       await _loadDicomFile(filePath);
     }
+  }
+
+  Future<void> _openDownloadsFolder() async {
+    final dicomDir = await _getDicomDownloadsDirectory();
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text('Downloads folder: ${dicomDir.path}')),
+    );
+    // User can now pick files from this location using "Pick DICOM File"
   }
 
   Future<void> _loadDicomFile(String filePath) async {
@@ -278,6 +321,11 @@ class _MyHomePageState extends State<MyHomePage> with TickerProviderStateMixin {
     setState(() {
       _queryingPatients = true;
       _patients.clear();
+      _selectedPatient = null;
+      _selectedStudy = null;
+      _selectedSeries = null;
+      _studies = [];
+      _series = [];
     });
 
     final serverHost = _serverHostController.text.trim();
@@ -311,10 +359,185 @@ class _MyHomePageState extends State<MyHomePage> with TickerProviderStateMixin {
       setState(() {
         _queryingPatients = false;
       });
+      final message = e.toString();
+      final isAssociationAbort =
+          message.toLowerCase().contains('peer aborted association') ||
+          message.toLowerCase().contains('never connected');
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Error querying patients: $e')),
+        SnackBar(
+          content: Text(
+            isAssociationAbort
+                ? 'C-FIND failed: peer aborted association. Check Orthanc QueryRetrieveEnabled and AE title/modality config.'
+                : 'Error querying patients: $e',
+          ),
+          duration: const Duration(seconds: 6),
+        ),
       );
     }
+  }
+
+  Future<void> _loadStudiesForPatient(String patientId) async {
+    if (!_serverConnected) return;
+
+    setState(() {
+      _queryingStudies = true;
+      _selectedStudy = null;
+      _selectedSeries = null;
+      _studies = [];
+      _series = [];
+    });
+
+    try {
+      final studyMaps = await _dcmtk.queryStudiesForPatient(
+        serverHost: _serverHostController.text.trim(),
+        serverPort: int.tryParse(_serverPortController.text.trim()) ?? 4242,
+        aeTitle: _aeTitleController.text.trim(),
+        calledAeTitle: _calledAeTitleController.text.trim(),
+        patientId: patientId,
+      );
+
+      setState(() {
+        _studies = studyMaps.map((map) => DicomStudy.fromMap(map)).toList();
+        _queryingStudies = false;
+      });
+    } catch (e) {
+      setState(() {
+        _queryingStudies = false;
+      });
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Error querying studies: $e')),
+      );
+    }
+  }
+
+  Future<void> _loadSeriesForStudy(String studyInstanceUID) async {
+    if (!_serverConnected) return;
+
+    setState(() {
+      _queryingSeries = true;
+      _selectedSeries = null;
+      _series = [];
+    });
+
+    try {
+      final seriesMaps = await _dcmtk.querySeriesForStudy(
+        serverHost: _serverHostController.text.trim(),
+        serverPort: int.tryParse(_serverPortController.text.trim()) ?? 4242,
+        aeTitle: _aeTitleController.text.trim(),
+        calledAeTitle: _calledAeTitleController.text.trim(),
+        studyInstanceUID: studyInstanceUID,
+      );
+
+      setState(() {
+        _series = seriesMaps.map((map) => DicomSeries.fromMap(map)).toList();
+        _queryingSeries = false;
+      });
+    } catch (e) {
+      setState(() {
+        _queryingSeries = false;
+      });
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Error querying series: $e')),
+      );
+    }
+  }
+
+  Future<void> _runConnectionDiagnostics() async {
+    final serverHost = _serverHostController.text.trim();
+    final serverPort = int.tryParse(_serverPortController.text.trim()) ?? 4242;
+    final aeTitle = _aeTitleController.text.trim();
+    final calledAeTitle = _calledAeTitleController.text.trim();
+
+    if (serverHost.isEmpty || aeTitle.isEmpty || calledAeTitle.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Please fill in Host, AE Title, and Called AE Title first')),
+      );
+      return;
+    }
+
+    setState(() {
+      _runningDiagnostics = true;
+      _echoStatus = 'Running...';
+      _findStatus = 'Waiting for C-ECHO';
+      _diagnosticsSummary = 'Running preflight checks';
+      _diagnosticsHint = '';
+    });
+
+    final List<String> hints = [];
+    bool echoOk = false;
+    bool findOk = false;
+
+    try {
+      echoOk = await _dcmtk.testServerConnection(
+        serverHost: serverHost,
+        serverPort: serverPort,
+        aeTitle: aeTitle,
+        calledAeTitle: calledAeTitle,
+      );
+
+      setState(() {
+        _echoStatus = echoOk ? 'OK' : 'FAILED';
+        _serverConnected = echoOk;
+        _findStatus = 'Running...';
+      });
+
+      if (!echoOk) {
+        hints.add('C-ECHO failed: check host/port and Called AE Title.');
+      }
+    } catch (e) {
+      setState(() {
+        _echoStatus = 'ERROR: $e';
+        _findStatus = 'Skipped due to C-ECHO error';
+      });
+      hints.add('C-ECHO threw an error: verify DICOM service is reachable from simulator.');
+    }
+
+    if (echoOk) {
+      await Future.delayed(const Duration(milliseconds: 300));
+      try {
+        final patients = await _dcmtk.queryPatients(
+          serverHost: serverHost,
+          serverPort: serverPort,
+          aeTitle: aeTitle,
+          calledAeTitle: calledAeTitle,
+        );
+
+        findOk = true;
+        setState(() {
+          _patients = patients.map((patientMap) => DicomPatient.fromMap(patientMap)).toList();
+          _findStatus = 'OK (${patients.length} patients)';
+        });
+      } catch (e) {
+        final msg = e.toString();
+        final normalized = msg.toLowerCase();
+        final isAssociationAbort = normalized.contains('peer aborted association') ||
+            normalized.contains('never connected');
+
+        setState(() {
+          _findStatus = 'FAILED: $e';
+        });
+
+        if (isAssociationAbort) {
+          hints.add('C-FIND association aborted: enable QueryRetrieveEnabled in Orthanc.');
+          hints.add('Ensure "$aeTitle" is permitted as a modality/peer in Orthanc config.');
+          hints.add('If Orthanc runs in Docker, use host.docker.internal instead of localhost.');
+        } else {
+          hints.add('C-FIND failed: check Orthanc logs and presentation context negotiation.');
+        }
+      }
+    }
+
+    final summary = echoOk && findOk
+        ? 'Diagnostics passed: C-ECHO and C-FIND are working.'
+        : echoOk
+            ? 'Partial success: C-ECHO works, C-FIND needs configuration fixes.'
+            : 'Diagnostics failed: could not establish DICOM association.';
+
+    setState(() {
+      _runningDiagnostics = false;
+      _diagnosticsSummary = summary;
+      _diagnosticsHint = hints.join('\n');
+    });
   }
 
   Future<void> _createNewPatient() async {
@@ -443,6 +666,247 @@ class _MyHomePageState extends State<MyHomePage> with TickerProviderStateMixin {
     }
   }
 
+  void _openFilesFromExplorerSelection() {
+    if (_selectedSeries == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Select a series first in Explorer.')),
+      );
+      return;
+    }
+
+    final patientName = _selectedPatient?.patientName.isNotEmpty == true
+        ? _selectedPatient!.patientName
+        : 'Unknown';
+    final patientId = _selectedPatient?.patientId ?? '-';
+    final studyDesc = _selectedStudy?.studyDescription.isNotEmpty == true
+        ? _selectedStudy!.studyDescription
+        : 'N/A';
+    final seriesDesc = _selectedSeries!.seriesDescription.isNotEmpty
+        ? _selectedSeries!.seriesDescription
+        : 'N/A';
+    final seriesUid = _selectedSeries!.seriesInstanceUID;
+
+    setState(() {
+      _dicomImage = null;
+      _result = 'Explorer Selection\n\n'
+          'Patient: $patientName ($patientId)\n'
+          'Study: $studyDesc\n'
+          'Series: $seriesDesc\n'
+          'Series UID: $seriesUid\n\n'
+          'No local DICOM file is loaded yet.\n'
+          'Click "Download First Instance" to fetch one DICOM from Orthanc and open it in this tab.';
+    });
+
+    _tabController.animateTo(_tabFiles);
+  }
+
+  Future<void> _downloadSelectedSeriesFirstInstance() async {
+    if (_selectedSeries == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Select a series first.')),
+      );
+      return;
+    }
+
+    final httpHost = _httpHostController.text.trim();
+    final httpPort = int.tryParse(_httpPortController.text.trim()) ?? 8042;
+    if (httpHost.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('HTTP host is required in Server tab.')),
+      );
+      return;
+    }
+
+    setState(() {
+      _downloadingFromExplorer = true;
+      _loading = true;
+      _dicomImage = null;
+      _result = 'Downloading first instance for selected series...';
+    });
+
+    final client = HttpClient();
+    try {
+      final base = Uri.parse('http://$httpHost:$httpPort');
+
+      final findReq = await client.postUrl(base.resolve('/tools/find'));
+      findReq.headers.contentType = ContentType.json;
+      final findBody = jsonEncode({
+        'Level': 'Series',
+        'Query': {
+          'SeriesInstanceUID': _selectedSeries!.seriesInstanceUID,
+        },
+      });
+      findReq.add(utf8.encode(findBody));
+      final findResp = await findReq.close();
+      final findText = await utf8.decodeStream(findResp);
+      if (findResp.statusCode < 200 || findResp.statusCode >= 300) {
+        throw Exception('Orthanc /tools/find failed (${findResp.statusCode}): $findText');
+      }
+
+      final dynamic findJson = jsonDecode(findText);
+      if (findJson is! List || findJson.isEmpty) {
+        throw Exception('No Orthanc series found for selected SeriesInstanceUID.');
+      }
+      final orthancSeriesId = findJson.first.toString();
+
+      final seriesReq = await client.getUrl(base.resolve('/series/$orthancSeriesId'));
+      final seriesResp = await seriesReq.close();
+      final seriesText = await utf8.decodeStream(seriesResp);
+      if (seriesResp.statusCode < 200 || seriesResp.statusCode >= 300) {
+        throw Exception('Orthanc /series/$orthancSeriesId failed (${seriesResp.statusCode}): $seriesText');
+      }
+
+      final dynamic seriesJson = jsonDecode(seriesText);
+      final instances = (seriesJson as Map<String, dynamic>)['Instances'];
+      if (instances is! List || instances.isEmpty) {
+        throw Exception('Selected series has no instances in Orthanc.');
+      }
+      final firstInstanceId = instances.first.toString();
+
+      final fileReq = await client.getUrl(base.resolve('/instances/$firstInstanceId/file'));
+      final fileResp = await fileReq.close();
+      if (fileResp.statusCode < 200 || fileResp.statusCode >= 300) {
+        final errText = await utf8.decodeStream(fileResp);
+        throw Exception('Orthanc /instances/$firstInstanceId/file failed (${fileResp.statusCode}): $errText');
+      }
+      final bytesBuilder = BytesBuilder(copy: false);
+      await for (final chunk in fileResp) {
+        bytesBuilder.add(chunk);
+      }
+      final bytes = bytesBuilder.takeBytes();
+
+      // Save to persistent downloads directory instead of temp
+      final downloadsDir = await _getDicomDownloadsDirectory();
+      final timestamp = DateTime.now().millisecondsSinceEpoch;
+      final seriesDesc = _selectedSeries!.seriesDescription.isEmpty 
+          ? 'Series' 
+          : _selectedSeries!.seriesDescription.replaceAll(RegExp(r'[^\w\s]'), '');
+      final filename = 'Orthanc_${seriesDesc}_$timestamp.dcm';
+      final outFile = File('${downloadsDir.path}/$filename');
+      await outFile.writeAsBytes(bytes, flush: true);
+
+      await _loadDicomFile(outFile.path);
+      _tabController.animateTo(_tabFiles);
+
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Downloaded to: ${downloadsDir.path}')),
+        );
+      }
+    } catch (e) {
+      setState(() {
+        _loading = false;
+        _result = 'Download failed: $e';
+      });
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Download failed: $e')),
+        );
+      }
+    } finally {
+      client.close(force: true);
+      if (mounted) {
+        setState(() {
+          _downloadingFromExplorer = false;
+        });
+      }
+    }
+  }
+
+  Future<void> _downloadSeriesViaCMove() async {
+    if (_selectedSeries == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Select a series first.')),
+      );
+      return;
+    }
+
+    final serverHost = _serverHostController.text.trim();
+    final serverPort = int.tryParse(_serverPortController.text.trim()) ?? 4242;
+    final aeTitle = _aeTitleController.text.trim();
+    final calledAeTitle = _calledAeTitleController.text.trim();
+
+    if (serverHost.isEmpty || aeTitle.isEmpty || calledAeTitle.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('DICOM server settings required in Server tab.')),
+      );
+      return;
+    }
+
+    setState(() {
+      _downloadingViaDicom = true;
+      _loading = true;
+      _dicomImage = null;
+      _result = 'Downloading series via C-MOVE...';
+    });
+
+    try {
+      final downloadsDir = await _getDicomDownloadsDirectory();
+      
+      final instances = await _dcmtk.downloadInstancesViaCMove(
+        serverHost: serverHost,
+        serverPort: serverPort,
+        aeTitle: aeTitle,
+        calledAeTitle: calledAeTitle,
+        seriesInstanceUID: _selectedSeries!.seriesInstanceUID,
+        localStoragePath: downloadsDir.path,
+      );
+
+      if (instances.isEmpty) {
+        throw Exception('C-MOVE returned no instances. Check server C-MOVE availability.');
+      }
+
+      // For now, load the first instance if available with a file path
+      String? firstFilePath;
+      for (final instance in instances) {
+        final filePath = instance['filePath'] as String?;
+        if (filePath != null && filePath.isNotEmpty) {
+          firstFilePath = filePath;
+          break;
+        }
+      }
+
+      if (firstFilePath == null || firstFilePath.isEmpty) {
+        throw Exception('C-MOVE did not return valid file paths.');
+      }
+
+      // Check if file exists, if not explain the limitation
+      final file = File(firstFilePath);
+      if (!await file.exists()) {
+        setState(() {
+          _result = 'C-MOVE negotiation successful. Instances queued (file transfer requires server callback support). '
+              'Consider using HTTP download instead for Orthanc. Downloads folder: ${downloadsDir.path}';
+        });
+        return;
+      }
+
+      await _loadDicomFile(firstFilePath);
+      _tabController.animateTo(_tabFiles);
+
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('C-MOVE downloaded to: ${downloadsDir.path}')),
+        );
+      }
+    } catch (e) {
+      setState(() {
+        _loading = false;
+        _result = 'C-MOVE download failed: $e';
+      });
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('C-MOVE download failed: $e')),
+        );
+      }
+    } finally {
+      if (mounted) {
+        setState(() {
+          _downloadingViaDicom = false;
+        });
+      }
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -452,6 +916,7 @@ class _MyHomePageState extends State<MyHomePage> with TickerProviderStateMixin {
           controller: _tabController,
           tabs: const [
             Tab(icon: Icon(Icons.file_open), text: 'Files'),
+            Tab(icon: Icon(Icons.travel_explore), text: 'Explorer'),
             Tab(icon: Icon(Icons.cloud), text: 'Server'),
             Tab(icon: Icon(Icons.person_add), text: 'Patients'),
             Tab(icon: Icon(Icons.upload), text: 'Media'),
@@ -462,6 +927,7 @@ class _MyHomePageState extends State<MyHomePage> with TickerProviderStateMixin {
         controller: _tabController,
         children: [
           _buildFileLoadingTab(),
+          _buildExplorerTab(),
           _buildServerTab(),
           _buildPatientManagementTab(),
           _buildMediaUploadTab(),
@@ -475,9 +941,25 @@ class _MyHomePageState extends State<MyHomePage> with TickerProviderStateMixin {
       padding: const EdgeInsets.all(16.0),
       child: Column(
         children: [
-          ElevatedButton(
-            onPressed: _loading ? null : _pickAndLoadDicomFile,
-            child: Text(_loading ? 'Loading...' : 'Pick DICOM File'),
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            children: [
+              ElevatedButton(
+                onPressed: _loading ? null : _pickAndLoadDicomFile,
+                child: Text(_loading ? 'Loading...' : 'Pick DICOM File'),
+              ),
+              OutlinedButton.icon(
+                onPressed: () => _tabController.animateTo(_tabExplorer),
+                icon: const Icon(Icons.travel_explore),
+                label: const Text('Browse DICOM Server'),
+              ),
+              OutlinedButton.icon(
+                onPressed: _openDownloadsFolder,
+                icon: const Icon(Icons.folder_open),
+                label: const Text('View Downloads'),
+              ),
+            ],
           ),
           const SizedBox(height: 20),
           if (_dicomImage != null) ...[
@@ -522,6 +1004,260 @@ class _MyHomePageState extends State<MyHomePage> with TickerProviderStateMixin {
     );
   }
 
+  Widget _buildExplorerTab() {
+    return Padding(
+      padding: const EdgeInsets.all(16.0),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Text(
+            'DICOM Explorer',
+            style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+          ),
+          const SizedBox(height: 8),
+          const Text(
+            'Browse remote patient records and drill down to studies/series. Download-to-Files is the next step.',
+            style: TextStyle(color: Colors.grey),
+          ),
+          const SizedBox(height: 12),
+          if (!_serverConnected)
+            Card(
+              color: Colors.orange.shade50,
+              child: Padding(
+                padding: const EdgeInsets.all(12.0),
+                child: Row(
+                  children: [
+                    const Icon(Icons.warning_amber, color: Colors.orange),
+                    const SizedBox(width: 8),
+                    const Expanded(
+                      child: Text('Server not connected. Configure and test connection first.'),
+                    ),
+                    TextButton(
+                      onPressed: () => _tabController.animateTo(_tabServer),
+                      child: const Text('Open Server'),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            children: [
+              ElevatedButton.icon(
+                onPressed: _serverConnected && !_queryingPatients ? _queryPatients : null,
+                icon: const Icon(Icons.refresh),
+                label: Text(_queryingPatients ? 'Refreshing...' : 'Refresh Patients'),
+              ),
+              ElevatedButton.icon(
+                onPressed: _selectedPatient == null
+                    ? null
+                    : () => _tabController.animateTo(_tabMedia),
+                icon: const Icon(Icons.upload),
+                label: const Text('Use In Media Tab'),
+              ),
+            ],
+          ),
+          const SizedBox(height: 12),
+          Expanded(
+            child: Row(
+              children: [
+                Expanded(
+                  flex: 3,
+                  child: Container(
+                    decoration: BoxDecoration(
+                      border: Border.all(color: Colors.grey.shade300),
+                      borderRadius: BorderRadius.circular(8),
+                    ),
+                    child: _patients.isEmpty
+                        ? Center(
+                            child: Text(
+                              _queryingPatients
+                                  ? 'Loading patients...'
+                                  : 'No patients loaded',
+                              style: const TextStyle(color: Colors.grey),
+                            ),
+                          )
+                        : ListView.builder(
+                            itemCount: _patients.length,
+                            itemBuilder: (context, index) {
+                              final patient = _patients[index];
+                              final selected = _selectedPatient?.patientId == patient.patientId;
+                              return ListTile(
+                                selected: selected,
+                                leading: const Icon(Icons.person),
+                                title: Text(patient.patientName.isEmpty ? 'Unknown' : patient.patientName),
+                                subtitle: Text('ID: ${patient.patientId}'),
+                                trailing: selected ? const Icon(Icons.check_circle, color: Colors.blue) : null,
+                                onTap: () {
+                                  setState(() {
+                                    _selectedPatient = patient;
+                                  });
+                                  _loadStudiesForPatient(patient.patientId);
+                                },
+                              );
+                            },
+                          ),
+                  ),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  flex: 2,
+                  child: Container(
+                    width: double.infinity,
+                    padding: const EdgeInsets.all(12),
+                    decoration: BoxDecoration(
+                      color: Colors.blue.shade50,
+                      borderRadius: BorderRadius.circular(8),
+                      border: Border.all(color: Colors.blue.shade200),
+                    ),
+                    child: _selectedPatient == null
+                        ? const Center(
+                            child: Text('Select a patient to view details'),
+                          )
+                        : SingleChildScrollView(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                const Text(
+                                  'Patient Details',
+                                  style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+                                ),
+                                const SizedBox(height: 8),
+                                Text('Name: ${_selectedPatient!.patientName.isEmpty ? 'Unknown' : _selectedPatient!.patientName}'),
+                                const SizedBox(height: 4),
+                                Text('ID: ${_selectedPatient!.patientId}'),
+                                const SizedBox(height: 4),
+                                Text('Birth Date: ${_selectedPatient!.patientBirthDate.isEmpty ? '-' : _selectedPatient!.patientBirthDate}'),
+                                const SizedBox(height: 4),
+                                Text('Sex: ${_selectedPatient!.patientSex.isEmpty ? '-' : _selectedPatient!.patientSex}'),
+                                const SizedBox(height: 12),
+                                Row(
+                                  children: [
+                                    Expanded(
+                                      child: ElevatedButton.icon(
+                                        onPressed: _queryingStudies
+                                            ? null
+                                            : () => _loadStudiesForPatient(_selectedPatient!.patientId),
+                                        icon: const Icon(Icons.folder_open, size: 16),
+                                        label: Text(_queryingStudies ? 'Loading...' : 'Load Studies'),
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                                const SizedBox(height: 10),
+                                Text('Studies (${_studies.length})', style: const TextStyle(fontWeight: FontWeight.bold)),
+                                const SizedBox(height: 6),
+                                SizedBox(
+                                  height: 140,
+                                  child: _studies.isEmpty
+                                      ? const Center(child: Text('No studies loaded', style: TextStyle(color: Colors.grey)))
+                                      : ListView.builder(
+                                          itemCount: _studies.length,
+                                          itemBuilder: (context, index) {
+                                            final study = _studies[index];
+                                            final isSelected = _selectedStudy?.studyInstanceUID == study.studyInstanceUID;
+                                            return ListTile(
+                                              dense: true,
+                                              selected: isSelected,
+                                              title: Text(study.studyDescription.isEmpty ? 'Study ${index + 1}' : study.studyDescription),
+                                              subtitle: Text(study.studyDate.isEmpty ? study.studyInstanceUID : study.studyDate),
+                                              trailing: isSelected ? const Icon(Icons.check_circle, color: Colors.blue, size: 18) : null,
+                                              onTap: () {
+                                                setState(() {
+                                                  _selectedStudy = study;
+                                                });
+                                                _loadSeriesForStudy(study.studyInstanceUID);
+                                              },
+                                            );
+                                          },
+                                        ),
+                                ),
+                                const SizedBox(height: 10),
+                                Text('Series (${_series.length})', style: const TextStyle(fontWeight: FontWeight.bold)),
+                                const SizedBox(height: 6),
+                                SizedBox(
+                                  height: 140,
+                                  child: _series.isEmpty
+                                      ? Center(
+                                          child: Text(
+                                            _queryingSeries ? 'Loading series...' : 'Select a study to load series',
+                                            style: const TextStyle(color: Colors.grey),
+                                            textAlign: TextAlign.center,
+                                          ),
+                                        )
+                                      : ListView.builder(
+                                          itemCount: _series.length,
+                                          itemBuilder: (context, index) {
+                                            final series = _series[index];
+                                            final isSelected = _selectedSeries?.seriesInstanceUID == series.seriesInstanceUID;
+                                            return ListTile(
+                                              dense: true,
+                                              selected: isSelected,
+                                              title: Text(series.seriesDescription.isEmpty ? 'Series ${index + 1}' : series.seriesDescription),
+                                              subtitle: Text('${series.modality}  #${series.seriesNumber}'),
+                                              trailing: isSelected ? const Icon(Icons.check_circle, color: Colors.blue, size: 18) : null,
+                                              onTap: () {
+                                                setState(() {
+                                                  _selectedSeries = series;
+                                                });
+                                              },
+                                            );
+                                          },
+                                        ),
+                                ),
+                                const SizedBox(height: 10),
+                                OutlinedButton.icon(
+                                  onPressed: _openFilesFromExplorerSelection,
+                                  icon: const Icon(Icons.file_open),
+                                  label: const Text('Open Files Tab'),
+                                ),
+                                const SizedBox(height: 8),
+                                ElevatedButton.icon(
+                                  onPressed: (_selectedSeries == null || _downloadingFromExplorer)
+                                      ? null
+                                      : _downloadSelectedSeriesFirstInstance,
+                                  icon: const Icon(Icons.download),
+                                  label: Text(_downloadingFromExplorer
+                                      ? 'Downloading...'
+                                      : 'Download First Instance'),
+                                ),
+                                const SizedBox(height: 8),
+                                const Text(
+                                  'This uses Orthanc HTTP API (/tools/find, /series/{id}, /instances/{id}/file) and opens the downloaded DICOM in Files tab.',
+                                  style: TextStyle(fontSize: 12, color: Colors.grey),
+                                ),
+                                const SizedBox(height: 12),
+                                ElevatedButton.icon(
+                                  onPressed: (_selectedSeries == null || _downloadingViaDicom)
+                                      ? null
+                                      : _downloadSeriesViaCMove,
+                                  icon: const Icon(Icons.cloud_download),
+                                  label: Text(_downloadingViaDicom
+                                      ? 'C-MOVE...'
+                                      : 'Download via C-MOVE'),
+                                  style: ElevatedButton.styleFrom(
+                                    backgroundColor: Colors.orange,
+                                  ),
+                                ),
+                                const SizedBox(height: 8),
+                                const Text(
+                                  'This uses native DICOM C-MOVE protocol. Less reliable than HTTP; requires server support for callbacks.',
+                                  style: TextStyle(fontSize: 12, color: Colors.grey),
+                                ),
+                              ],
+                            ),
+                          ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
   Widget _buildServerTab() {
     return Padding(
       padding: const EdgeInsets.all(16.0),
@@ -530,7 +1266,7 @@ class _MyHomePageState extends State<MyHomePage> with TickerProviderStateMixin {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             const Text(
-              'DICOM Server Connection',
+              'DICOM Server Configuration',
               style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
             ),
             const SizedBox(height: 8),
@@ -554,7 +1290,7 @@ class _MyHomePageState extends State<MyHomePage> with TickerProviderStateMixin {
                   Text('🔧 For C-FIND to work, add to Orthanc.json:', style: TextStyle(fontWeight: FontWeight.bold)),
                   Text('"QueryRetrieveEnabled": true,', style: TextStyle(fontFamily: 'monospace', fontSize: 12)),
                   Text('"DicomModalities": {', style: TextStyle(fontFamily: 'monospace', fontSize: 12)),
-                  Text('  "FLUTTER": ["FLUTTER", "localhost", 4242]', style: TextStyle(fontFamily: 'monospace', fontSize: 12)),
+                  Text('  "FLUTTER_SCU": ["FLUTTER_SCU", "host.docker.internal", 4242]', style: TextStyle(fontFamily: 'monospace', fontSize: 12)),
                   Text('}', style: TextStyle(fontFamily: 'monospace', fontSize: 12)),
                 ],
               ),
@@ -564,7 +1300,7 @@ class _MyHomePageState extends State<MyHomePage> with TickerProviderStateMixin {
               controller: _serverHostController,
               decoration: const InputDecoration(
                 labelText: 'Server Host',
-                hintText: 'localhost',
+                hintText: '127.0.0.1',
                 border: OutlineInputBorder(),
               ),
             ),
@@ -580,7 +1316,10 @@ class _MyHomePageState extends State<MyHomePage> with TickerProviderStateMixin {
               keyboardType: TextInputType.number,
             ),
             const SizedBox(height: 8),
-            Row(
+            Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              crossAxisAlignment: WrapCrossAlignment.center,
               children: [
                 ElevatedButton.icon(
                   onPressed: () => _serverPortController.text = '4242',
@@ -591,7 +1330,6 @@ class _MyHomePageState extends State<MyHomePage> with TickerProviderStateMixin {
                     foregroundColor: Colors.black87,
                   ),
                 ),
-                const SizedBox(width: 8),
                 ElevatedButton.icon(
                   onPressed: () => _serverPortController.text = '11112',
                   icon: const Icon(Icons.settings, size: 16),
@@ -601,9 +1339,27 @@ class _MyHomePageState extends State<MyHomePage> with TickerProviderStateMixin {
                     foregroundColor: Colors.black87,
                   ),
                 ),
-                const SizedBox(width: 8),
-                const Text('← Common DICOM ports', style: TextStyle(color: Colors.grey)),
+                const Text('Common DICOM ports', style: TextStyle(color: Colors.grey)),
               ],
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: _httpHostController,
+              decoration: const InputDecoration(
+                labelText: 'Orthanc HTTP Host',
+                hintText: '127.0.0.1',
+                border: OutlineInputBorder(),
+              ),
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: _httpPortController,
+              decoration: const InputDecoration(
+                labelText: 'Orthanc HTTP Port',
+                hintText: '8042',
+                border: OutlineInputBorder(),
+              ),
+              keyboardType: TextInputType.number,
             ),
             const SizedBox(height: 12),
             TextField(
@@ -621,6 +1377,59 @@ class _MyHomePageState extends State<MyHomePage> with TickerProviderStateMixin {
                 labelText: 'Called AE Title (Server)',
                 hintText: 'ORTHANC',
                 border: OutlineInputBorder(),
+              ),
+            ),
+            const SizedBox(height: 16),
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: Colors.grey.shade50,
+                borderRadius: BorderRadius.circular(8),
+                border: Border.all(color: Colors.grey.shade300),
+              ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Text(
+                    'Connection Diagnostics',
+                    style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+                  ),
+                  const SizedBox(height: 8),
+                  Wrap(
+                    spacing: 12,
+                    runSpacing: 8,
+                    crossAxisAlignment: WrapCrossAlignment.center,
+                    children: [
+                      ElevatedButton.icon(
+                        onPressed: _runningDiagnostics ? null : _runConnectionDiagnostics,
+                        icon: const Icon(Icons.medical_services),
+                        label: Text(_runningDiagnostics ? 'Running...' : 'Run Preflight'),
+                      ),
+                      Text(
+                        _diagnosticsSummary,
+                        style: const TextStyle(fontWeight: FontWeight.w500),
+                      ),
+                    ],
+                  ),
+                  if (_runningDiagnostics) ...[
+                    const SizedBox(height: 8),
+                    const LinearProgressIndicator(),
+                  ],
+                  const SizedBox(height: 8),
+                  Text('C-ECHO: $_echoStatus'),
+                  const SizedBox(height: 4),
+                  Text('C-FIND: $_findStatus'),
+                  if (_diagnosticsHint.isNotEmpty) ...[
+                    const SizedBox(height: 8),
+                    const Text(
+                      'Hints:',
+                      style: TextStyle(fontWeight: FontWeight.bold),
+                    ),
+                    const SizedBox(height: 4),
+                    Text(_diagnosticsHint),
+                  ],
+                ],
               ),
             ),
             const SizedBox(height: 16),
@@ -775,7 +1584,7 @@ class _MyHomePageState extends State<MyHomePage> with TickerProviderStateMixin {
                       const SizedBox(height: 8),
                       ElevatedButton(
                         onPressed: () {
-                          _tabController.animateTo(1); // Switch to Server tab
+                          _tabController.animateTo(_tabServer); // Switch to Server tab
                         },
                         child: const Text('Go to Server Tab'),
                       ),
@@ -879,7 +1688,7 @@ class _MyHomePageState extends State<MyHomePage> with TickerProviderStateMixin {
                     const SizedBox(height: 12),
                     ElevatedButton(
                       onPressed: () {
-                        _tabController.animateTo(2); // Switch to Patients tab
+                        _tabController.animateTo(_tabPatients); // Switch to Patients tab
                       },
                       child: const Text('Go to Patients Tab'),
                     ),
