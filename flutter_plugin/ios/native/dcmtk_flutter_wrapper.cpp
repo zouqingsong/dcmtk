@@ -4,6 +4,9 @@
 #include <dcmtk/dcmdata/dcxfer.h>
 #include <dcmtk/dcmdata/dcpixel.h>
 #include <dcmtk/dcmdata/dcpxitem.h>
+#include <dcmtk/dcmdata/dcrledrg.h>
+#include <dcmtk/dcmjpeg/djdecode.h>
+#include <dcmtk/dcmjpls/djdecode.h>
 #include <dcmtk/dcmimgle/dcmimage.h>
 #include <dcmtk/dcmnet/scu.h>
 #include <dcmtk/dcmnet/diutil.h>
@@ -61,6 +64,12 @@ char* dcmtk_load_dicom_file(const char* filename) {
     if (dataset->findAndGetOFString(DCM_StudyDescription, studyDescription).good()) {
         oss << "Study Description: " << studyDescription << "\n";
     }
+
+    // Get SOP Instance UID (used by Flutter fallback to resolve Orthanc instance id)
+    OFString sopInstanceUID;
+    if (dataset->findAndGetOFString(DCM_SOPInstanceUID, sopInstanceUID).good()) {
+        oss << "SOPInstanceUID: " << sopInstanceUID << "\n";
+    }
     
     // Get Modality
     OFString modality;
@@ -86,6 +95,11 @@ char* dcmtk_load_dicom_file(const char* filename) {
     // Check for pixel data
     if (dataset->tagExists(DCM_PixelData)) {
         oss << "PixelData: Present\n";
+
+        OFString transferSyntaxUID;
+        if (fileformat.getMetaInfo() && fileformat.getMetaInfo()->findAndGetOFString(DCM_TransferSyntaxUID, transferSyntaxUID).good()) {
+            oss << "TransferSyntaxUID: " << transferSyntaxUID << "\n";
+        }
         
         // Get additional pixel information
         Uint16 bitsAllocated = 0, bitsStored = 0, highBit = 0, pixelRepresentation = 0, samplesPerPixel = 0;
@@ -156,6 +170,31 @@ DicomImageData* dcmtk_extract_image(const char* filename, int frame_index) {
         result->error_message = strdup("Error: could not get dataset");
         return result;
     }
+
+    // Register decoders once so supported compressed pixel data can be decompressed.
+    static bool codecsRegistered = false;
+    if (!codecsRegistered) {
+        DcmRLEDecoderRegistration::registerCodecs();
+        DJDecoderRegistration::registerCodecs();
+        DJLSDecoderRegistration::registerCodecs();
+        codecsRegistered = true;
+        DEBUG_LOG("Registered RLE, JPEG, and JPEG-LS decoders for image extraction");
+    }
+
+    // Try to materialize an uncompressed representation first.
+    E_TransferSyntax originalXfer = dataset->getOriginalXfer();
+    DEBUG_LOG("Dataset original transfer syntax: %d", (int)originalXfer);
+    OFCondition repStatus = dataset->chooseRepresentation(EXS_LittleEndianExplicit, NULL);
+    if (repStatus.good() && dataset->canWriteXfer(EXS_LittleEndianExplicit)) {
+        DEBUG_LOG("Created explicit little-endian representation for PixelData");
+    } else {
+        repStatus = dataset->chooseRepresentation(EXS_LittleEndianImplicit, NULL);
+        if (repStatus.good() && dataset->canWriteXfer(EXS_LittleEndianImplicit)) {
+            DEBUG_LOG("Created implicit little-endian representation for PixelData");
+        } else {
+            DEBUG_LOG("Could not create uncompressed representation: %s", repStatus.text());
+        }
+    }
     
     // Check if this is a multi-frame image
     OFString numFramesStr;
@@ -185,31 +224,43 @@ DicomImageData* dcmtk_extract_image(const char* filename, int frame_index) {
     
     DicomImage* image = nullptr;
     EI_Status imgStatus = EIS_InvalidImage;
-    E_TransferSyntax workingTransferSyntax = EXS_Unknown;
-    
-    // Try each transfer syntax
-    for (int i = 0; i < 5; i++) {
-        DEBUG_LOG("Trying transfer syntax %d", i);
-        
-        // For multi-frame images, try the basic constructor and handle frames differently
-        if (isMultiFrame) {
-            image = new DicomImage(dataset, transferSyntaxes[i]);
-        } else {
-            image = new DicomImage(dataset, transferSyntaxes[i]);
-        }
-        
-        if (image) {
-            imgStatus = image->getStatus();
-            DEBUG_LOG("Image status: %d", (int)imgStatus);
-            
-            if (imgStatus == EIS_Normal) {
-                workingTransferSyntax = transferSyntaxes[i];
-                DEBUG_LOG("SUCCESS: Image created with transfer syntax %d", i);
-                break;
-            }
-            
+
+    // First try dataset-based construction focused on the requested frame.
+    // Use the constructor overload that supports frame windowing.
+    if (isMultiFrame) {
+        image = new DicomImage(dataset, EXS_Unknown, 0, (unsigned long)frame_index, 1);
+    } else {
+        image = new DicomImage(dataset, EXS_Unknown);
+    }
+
+    if (image) {
+        imgStatus = image->getStatus();
+        DEBUG_LOG("Primary DicomImage status: %d", (int)imgStatus);
+        if (imgStatus != EIS_Normal) {
             delete image;
             image = nullptr;
+        }
+    }
+    
+    // Fallback: try dataset-based construction with different transfer syntaxes.
+    if (!image) {
+        for (int i = 0; i < 5; i++) {
+            DEBUG_LOG("Trying dataset transfer syntax %d", i);
+
+            image = new DicomImage(dataset, transferSyntaxes[i]);
+
+            if (image) {
+                imgStatus = image->getStatus();
+                DEBUG_LOG("Dataset-based image status: %d", (int)imgStatus);
+
+                if (imgStatus == EIS_Normal) {
+                    DEBUG_LOG("SUCCESS: Dataset image created with transfer syntax %d", i);
+                    break;
+                }
+
+                delete image;
+                image = nullptr;
+            }
         }
     }
     
@@ -236,6 +287,13 @@ DicomImageData* dcmtk_extract_image(const char* filename, int frame_index) {
         // For multi-frame images with missing attribute error, try direct pixel data access
         if (imgStatus == EIS_MissingAttribute && isMultiFrame) {
             DEBUG_LOG("Multi-frame image with missing attribute - trying direct pixel data access");
+
+            OFString transferSyntaxUID;
+            if (fileformat.getMetaInfo() && fileformat.getMetaInfo()->findAndGetOFString(DCM_TransferSyntaxUID, transferSyntaxUID).good()) {
+                error += " [TSUID=";
+                error += transferSyntaxUID.c_str();
+                error += "]";
+            }
             
             // Get basic image parameters
             Uint16 rows, cols, bitsAlloc = 8, samplesPerPixel = 1;

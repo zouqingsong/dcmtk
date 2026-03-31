@@ -48,6 +48,9 @@ class _MyHomePageState extends State<MyHomePage> with TickerProviderStateMixin {
   bool _loading = false;
   ui.Image? _dicomImage;
   String? _currentFilePath;
+  String? _currentOrthancInstanceId;
+  String? _currentSopInstanceUid;
+  final Map<String, String> _orthancInstanceByFilePath = <String, String>{};
   int _currentFrame = 0;
   int _totalFrames = 1;
   
@@ -138,6 +141,8 @@ class _MyHomePageState extends State<MyHomePage> with TickerProviderStateMixin {
 
     if (result != null && result.files.isNotEmpty) {
       final String filePath = result.files.first.path!;
+      _currentOrthancInstanceId = null;
+      _currentSopInstanceUid = null;
       await _loadDicomFile(filePath);
     }
   }
@@ -158,9 +163,16 @@ class _MyHomePageState extends State<MyHomePage> with TickerProviderStateMixin {
     });
 
     try {
+      await _hydrateOrthancContextFromFile(filePath);
       print('Loading DICOM file: $filePath');
       final String dicomInfo = await _dcmtk.loadDicomFile(filePath);
       print('DICOM info loaded: ${dicomInfo.substring(0, dicomInfo.length > 500 ? 500 : dicomInfo.length)}...');
+
+      final sopMatch = RegExp(r'SOPInstanceUID:\s*([^\n\r]+)').firstMatch(dicomInfo);
+      _currentSopInstanceUid = sopMatch?.group(1)?.trim();
+      if (_currentSopInstanceUid != null && _currentSopInstanceUid!.isNotEmpty) {
+        print('Detected SOPInstanceUID: $_currentSopInstanceUid');
+      }
 
       // Parse frame count from DICOM info
       final framesMatch = RegExp(r'NumberOfFrames.*?(\d+)').firstMatch(dicomInfo);
@@ -188,6 +200,47 @@ class _MyHomePageState extends State<MyHomePage> with TickerProviderStateMixin {
     }
   }
 
+  Future<void> _hydrateOrthancContextFromFile(String filePath) async {
+    if (_currentOrthancInstanceId != null && _currentOrthancInstanceId!.isNotEmpty) {
+      return;
+    }
+
+    final mapped = _orthancInstanceByFilePath[filePath];
+    if (mapped != null && mapped.isNotEmpty) {
+      _currentOrthancInstanceId = mapped;
+      return;
+    }
+
+    final fileName = filePath.split('/').last;
+    final nameMatch = RegExp(r'^OrthancInst_([^_]+)_').firstMatch(fileName);
+    if (nameMatch != null && (nameMatch.group(1)?.isNotEmpty ?? false)) {
+      _currentOrthancInstanceId = nameMatch.group(1)!;
+      _orthancInstanceByFilePath[filePath] = _currentOrthancInstanceId!;
+      return;
+    }
+
+    final sidecar = File('$filePath.meta.json');
+    if (await sidecar.exists()) {
+      try {
+        final text = await sidecar.readAsString();
+        final dynamic meta = jsonDecode(text);
+        if (meta is Map<String, dynamic>) {
+          final id = meta['orthancInstanceId']?.toString() ?? '';
+          if (id.isNotEmpty) {
+            _currentOrthancInstanceId = id;
+            _orthancInstanceByFilePath[filePath] = id;
+          }
+          final sop = meta['sopInstanceUid']?.toString() ?? '';
+          if (sop.isNotEmpty) {
+            _currentSopInstanceUid = sop;
+          }
+        }
+      } catch (e) {
+        print('Failed to read sidecar metadata: $e');
+      }
+    }
+  }
+
   Future<void> _loadFrame(String filePath, int frameIndex) async {
     try {
       print('--- Loading frame $frameIndex from: $filePath');
@@ -207,6 +260,11 @@ class _MyHomePageState extends State<MyHomePage> with TickerProviderStateMixin {
         print('Successfully converted to UI image');
       } else {
         print('WARNING: extractImage returned null');
+        image = await _loadOrthancPreviewFrame(frameIndex);
+      }
+
+      if (image == null) {
+        print('WARNING: No renderable image for frame $frameIndex');
       }
       
       setState(() {
@@ -217,11 +275,111 @@ class _MyHomePageState extends State<MyHomePage> with TickerProviderStateMixin {
       print('Frame $frameIndex loaded successfully');
     } catch (e) {
       print('ERROR loading frame $frameIndex: $e');
-      
-      setState(() {
-        _result = 'Error extracting image: $e';
-        _dicomImage = null;
+
+      final fallback = await _loadOrthancPreviewFrame(frameIndex);
+      if (fallback != null) {
+        setState(() {
+          _dicomImage = fallback;
+          _currentFrame = frameIndex;
+          _result = 'Rendered via Orthanc preview fallback (native decode unavailable for this transfer syntax).';
+        });
+      } else {
+        setState(() {
+          _result = 'Error extracting image: $e';
+          _dicomImage = null;
+        });
+      }
+    }
+  }
+
+  Future<ui.Image?> _loadOrthancPreviewFrame(int frameIndex) async {
+    final httpHost = _httpHostController.text.trim();
+    final httpPort = int.tryParse(_httpPortController.text.trim()) ?? 8042;
+    if (httpHost.isEmpty) {
+      return null;
+    }
+
+    if (_currentOrthancInstanceId == null || _currentOrthancInstanceId!.isEmpty) {
+      await _resolveOrthancInstanceIdFromSopUid(httpHost, httpPort);
+      if (_currentOrthancInstanceId == null || _currentOrthancInstanceId!.isEmpty) {
+        print('Orthanc fallback unavailable: no instance id could be resolved from SOP UID');
+        return null;
+      }
+    }
+
+    final client = HttpClient();
+    try {
+      final base = Uri.parse('http://$httpHost:$httpPort');
+      final req = await client.getUrl(
+        base.resolve('/instances/${_currentOrthancInstanceId!}/frames/$frameIndex/preview'),
+      );
+      final resp = await req.close();
+      if (resp.statusCode < 200 || resp.statusCode >= 300) {
+        return null;
+      }
+
+      final bytesBuilder = BytesBuilder(copy: false);
+      await for (final chunk in resp) {
+        bytesBuilder.add(chunk);
+      }
+      final bytes = bytesBuilder.takeBytes();
+      if (bytes.isEmpty) {
+        return null;
+      }
+
+      final codec = await ui.instantiateImageCodec(bytes);
+      final frame = await codec.getNextFrame();
+      print('Loaded frame $frameIndex via Orthanc preview fallback');
+      return frame.image;
+    } catch (e) {
+      print('Orthanc preview fallback failed for frame $frameIndex: $e');
+      return null;
+    } finally {
+      client.close(force: true);
+    }
+  }
+
+  Future<void> _resolveOrthancInstanceIdFromSopUid(String httpHost, int httpPort) async {
+    if (_currentSopInstanceUid == null || _currentSopInstanceUid!.isEmpty) {
+      // Last resort: if current explorer context exists, find any instance in selected series.
+      if (_selectedSeries == null) return;
+    }
+
+    final client = HttpClient();
+    try {
+      final base = Uri.parse('http://$httpHost:$httpPort');
+      final findReq = await client.postUrl(base.resolve('/tools/find'));
+      findReq.headers.contentType = ContentType.json;
+      final body = jsonEncode({
+        'Level': 'Instance',
+        'Query': _currentSopInstanceUid != null && _currentSopInstanceUid!.isNotEmpty
+            ? {
+                'SOPInstanceUID': _currentSopInstanceUid,
+              }
+            : {
+                'SeriesInstanceUID': _selectedSeries!.seriesInstanceUID,
+              },
       });
+      findReq.add(utf8.encode(body));
+      final resp = await findReq.close();
+      final text = await utf8.decodeStream(resp);
+      if (resp.statusCode < 200 || resp.statusCode >= 300) {
+        print('Orthanc instance resolve failed (${resp.statusCode}): $text');
+        return;
+      }
+
+      final dynamic json = jsonDecode(text);
+      if (json is List && json.isNotEmpty) {
+        _currentOrthancInstanceId = json.first.toString();
+        print('Resolved Orthanc instance id from SOP UID: $_currentOrthancInstanceId');
+        if (_currentFilePath != null && _currentFilePath!.isNotEmpty) {
+          _orthancInstanceByFilePath[_currentFilePath!] = _currentOrthancInstanceId!;
+        }
+      }
+    } catch (e) {
+      print('Orthanc instance resolve error: $e');
+    } finally {
+      client.close(force: true);
     }
   }
 
@@ -762,6 +920,7 @@ class _MyHomePageState extends State<MyHomePage> with TickerProviderStateMixin {
         throw Exception('Selected series has no instances in Orthanc.');
       }
       final firstInstanceId = instances.first.toString();
+      _currentOrthancInstanceId = firstInstanceId;
 
       final fileReq = await client.getUrl(base.resolve('/instances/$firstInstanceId/file'));
       final fileResp = await fileReq.close();
@@ -781,9 +940,20 @@ class _MyHomePageState extends State<MyHomePage> with TickerProviderStateMixin {
       final seriesDesc = _selectedSeries!.seriesDescription.isEmpty 
           ? 'Series' 
           : _selectedSeries!.seriesDescription.replaceAll(RegExp(r'[^\w\s]'), '');
-      final filename = 'Orthanc_${seriesDesc}_$timestamp.dcm';
+      final filename = 'OrthancInst_${firstInstanceId}_${seriesDesc}_$timestamp.dcm';
       final outFile = File('${downloadsDir.path}/$filename');
       await outFile.writeAsBytes(bytes, flush: true);
+
+      _orthancInstanceByFilePath[outFile.path] = firstInstanceId;
+      final metaFile = File('${outFile.path}.meta.json');
+      await metaFile.writeAsString(
+        jsonEncode({
+          'orthancInstanceId': firstInstanceId,
+          'seriesInstanceUID': _selectedSeries!.seriesInstanceUID,
+          'savedAt': DateTime.now().toIso8601String(),
+        }),
+        flush: true,
+      );
 
       await _loadDicomFile(outFile.path);
       _tabController.animateTo(_tabFiles);
@@ -842,6 +1012,8 @@ class _MyHomePageState extends State<MyHomePage> with TickerProviderStateMixin {
 
     try {
       final downloadsDir = await _getDicomDownloadsDirectory();
+      _currentOrthancInstanceId = null;
+      _currentSopInstanceUid = null;
       
       final instances = await _dcmtk.downloadInstancesViaCMove(
         serverHost: serverHost,

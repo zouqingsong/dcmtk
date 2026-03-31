@@ -78,7 +78,7 @@ SIMULATOR_LIB_DIR="${SIMULATOR_LIBS[0]}"
 
 # Build the Flutter wrapper
 echo "Building Flutter wrapper..."
-WRAPPER_DIR="$PROJECT_ROOT/flutter_plugin/ios_wrapper"
+WRAPPER_DIR="$PROJECT_ROOT/flutter_plugin/ios/native"
 WRAPPER_SRC="$WRAPPER_DIR/dcmtk_flutter_wrapper.cpp"
 WRAPPER_OBJ_DIR="$BUILD_DIR/wrapper_obj"
 mkdir -p "$WRAPPER_OBJ_DIR"
@@ -125,6 +125,12 @@ for PLATFORM in "OS" "SIMULATOR64"; do
         -I"$PROJECT_ROOT/ofstd/include" \
         -I"$PROJECT_ROOT/oflog/include" \
         -I"$PROJECT_ROOT/dcmdata/include" \
+        -I"$PROJECT_ROOT/dcmimgle/include" \
+        -I"$PROJECT_ROOT/dcmimage/include" \
+        -I"$PROJECT_ROOT/dcmjpeg/include" \
+        -I"$PROJECT_ROOT/dcmjpls/include" \
+        -I"$PROJECT_ROOT/dcmnet/include" \
+        -I"$PROJECT_ROOT/dcmtls/include" \
         -I"$WRAPPER_DIR" \
         -DHAVE_CONFIG_H \
         -c "$WRAPPER_SRC" \
@@ -142,11 +148,21 @@ DEVICE_OBJ_DIR="$BUILD_DIR/device_obj"
 rm -rf "$DEVICE_LIB_DIR" "$DEVICE_OBJ_DIR"
 mkdir -p "$DEVICE_LIB_DIR" "$DEVICE_OBJ_DIR"
 
-# Extract all object files from device libraries
+# Extract all object files from device libraries, prefixing with library name to avoid collisions
 cd "$DEVICE_OBJ_DIR"
 for lib in "$BUILD_DIR/OS/install/lib"/*.a; do
+    LIB_BASE="$(basename "$lib" .a)"
+    LIB_OBJ_DIR="$DEVICE_OBJ_DIR/${LIB_BASE}_objs"
+    mkdir -p "$LIB_OBJ_DIR"
     echo "Extracting $(basename $lib)..."
+    cd "$LIB_OBJ_DIR"
     ar -x "$lib"
+    # Prefix each .o with the library name to avoid name collisions
+    for obj in *.o; do
+        mv "$obj" "$DEVICE_OBJ_DIR/${LIB_BASE}_${obj}"
+    done
+    cd "$DEVICE_OBJ_DIR"
+    rm -rf "$LIB_OBJ_DIR"
 done
 # Extract wrapper (it's already thin arm64, not a fat archive)
 ar -x "$WRAPPER_OBJ_DIR/libdcmtk_flutter_wrapper_OS.a"
@@ -164,8 +180,18 @@ mkdir -p "$SIMULATOR_LIB_DIR" "$SIMULATOR_OBJ_DIR"
 # Extract all object files from simulator libraries (arm64 only for Apple Silicon)
 cd "$SIMULATOR_OBJ_DIR"
 for lib in "$BUILD_DIR/SIMULATOR/install/lib"/*.a; do
+    LIB_BASE="$(basename "$lib" .a)"
+    LIB_OBJ_DIR="$SIMULATOR_OBJ_DIR/${LIB_BASE}_objs"
+    mkdir -p "$LIB_OBJ_DIR"
     echo "Extracting $(basename $lib)..."
+    cd "$LIB_OBJ_DIR"
     ar -x "$lib"
+    # Prefix each .o with the library name to avoid name collisions
+    for obj in *.o; do
+        mv "$obj" "$SIMULATOR_OBJ_DIR/${LIB_BASE}_${obj}"
+    done
+    cd "$SIMULATOR_OBJ_DIR"
+    rm -rf "$LIB_OBJ_DIR"
 done
 
 # Extract wrapper (already arm64-only, no need for lipo)
