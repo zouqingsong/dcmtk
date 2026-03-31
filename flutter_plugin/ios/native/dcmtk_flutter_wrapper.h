@@ -10,23 +10,27 @@ extern "C" {
 char* dcmtk_load_dicom_file(const char* filename);
 void dcmtk_free_string(char* str);
 
-// Get specific DICOM tag by name (malloc'd string returned)
+// Get specific DICOM tag value by group,element (e.g. "0010,0010" for PatientName)
+// Returns malloc'd string with the tag value, or error message
 char* dcmtk_get_dicom_tag(const char* file_path, const char* tag_name);
 
 // Version and validation
 char* dcmtk_get_version(void);
+// Returns 1 if valid DICOM, 0 otherwise. If details != NULL, writes diagnostic string.
 int dcmtk_validate_dicom_file(const char* file_path);
 
 // Legacy conversion API: convert DICOM to raw image bytes (8-bit grayscale)
-// Returns malloc'd buffer (caller must free with dcmtk_free_image_data_buffer)
 unsigned char* dcmtk_convert_to_image(const char* file_path, const char* format, int* data_size);
 void dcmtk_free_image_data_buffer(unsigned char* data);
 
-// Image extraction - structured result
+// Image extraction - structured result (supports grayscale and color)
 typedef struct {
-    unsigned char* data;
+    unsigned char* data;    // RGBA pixel data (4 bytes per pixel)
     int width;
     int height;
+    int samples_per_pixel;  // 1=grayscale, 3=RGB, 4=RGBA
+    int bits_stored;
+    int total_frames;       // Total number of frames in the DICOM file
     int error;
     char* error_message;
 } DicomImageData;
@@ -79,8 +83,8 @@ typedef struct {
 typedef struct {
     char* sop_instance_uid;
     char* instance_number;
-    char* file_path;        // Path where downloaded instance is stored
-    char* content_type;     // IMAGE, VIDEO, etc.
+    char* file_path;
+    char* content_type;
     int file_size;
 } DicomInstance;
 
@@ -110,7 +114,7 @@ typedef struct {
 typedef struct {
     int success;
     char* error_message;
-    char* generated_patient_id;  // For auto-generated IDs
+    char* generated_patient_id;
 } PatientCreationResult;
 
 // Media upload result
@@ -124,6 +128,9 @@ typedef struct {
 
 // Server connection and query functions
 int dcmtk_test_server_connection(const char* server_host, int server_port, const char* ae_title, const char* called_ae_title);
+// TLS-enabled server connection test
+int dcmtk_test_server_connection_tls(const char* server_host, int server_port, const char* ae_title, const char* called_ae_title,
+                                      const char* cert_file, const char* key_file, const char* ca_file);
 DicomQueryResult* dcmtk_query_patients(const char* server_host, int server_port, const char* ae_title, const char* called_ae_title);
 DicomStudyQueryResult* dcmtk_query_studies_for_patient(const char* server_host, int server_port, const char* ae_title, const char* called_ae_title, const char* patient_id);
 
@@ -134,9 +141,9 @@ DicomInstanceQueryResult* dcmtk_query_instances_for_series(const char* server_ho
 // Patient management functions
 PatientCreationResult* dcmtk_create_patient(const char* server_host, int server_port, const char* ae_title, const char* called_ae_title, PatientInfo* patient_info);
 
-// Media upload functions  
+// Media upload functions
 MediaUploadResult* dcmtk_upload_image(const char* server_host, int server_port, const char* ae_title, const char* called_ae_title, const char* patient_id, const char* image_path, const char* study_description, const char* series_description, const char* image_comments, const char* modality);
-MediaUploadResult* dcmtk_upload_video(const char* server_host, int server_port, const char* ae_title, const char* called_ae_title, const char* patient_id, const char* video_path, const char* study_description);
+MediaUploadResult* dcmtk_upload_video(const char* server_host, int server_port, const char* ae_title, const char* called_ae_title, const char* patient_id, const char* video_path, const char* study_description, const char* series_description, const char* image_comments, const char* modality);
 
 // Media retrieval functions
 DicomInstanceQueryResult* dcmtk_download_instances(const char* server_host, int server_port, const char* ae_title, const char* called_ae_title, const char* series_instance_uid, const char* local_storage_path);

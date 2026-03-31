@@ -11,6 +11,9 @@ extern "C" {
         unsigned char* data;
         int width;
         int height;
+        int samples_per_pixel;
+        int bits_stored;
+        int total_frames;
         int error;
         char* error_message;
     } DicomImageData;
@@ -118,6 +121,11 @@ extern "C" {
     void dcmtk_free_instance_query_result(DicomInstanceQueryResult* result);
     void dcmtk_free_patient_creation_result(PatientCreationResult* result);
     void dcmtk_free_media_upload_result(MediaUploadResult* result);
+    DicomInstanceQueryResult* dcmtk_query_instances_for_series(const char* server_host, int server_port, const char* ae_title, const char* called_ae_title, const char* series_instance_uid);
+    char* dcmtk_get_dicom_tag(const char* file_path, const char* tag_name);
+    int dcmtk_validate_dicom_file(const char* file_path);
+    int dcmtk_test_server_connection_tls(const char* server_host, int server_port, const char* ae_title, const char* called_ae_title,
+                                          const char* cert_file, const char* key_file, const char* ca_file);
 #ifdef __cplusplus
 }
 #endif
@@ -173,15 +181,18 @@ extern "C" {
       return;
     }
     
-    // Convert grayscale data to FlutterStandardTypedData
+    // Convert RGBA data to FlutterStandardTypedData
     NSData* pixelData = [NSData dataWithBytes:imgData->data 
-                                       length:imgData->width * imgData->height];
+                                       length:imgData->width * imgData->height * 4];
     FlutterStandardTypedData* typedData = [FlutterStandardTypedData typedDataWithBytes:pixelData];
     
     NSDictionary* imageResult = @{
       @"width": @(imgData->width),
       @"height": @(imgData->height),
-      @"data": typedData
+      @"data": typedData,
+      @"samplesPerPixel": @(imgData->samples_per_pixel),
+      @"bitsStored": @(imgData->bits_stored),
+      @"totalFrames": @(imgData->total_frames)
     };
     
     dcmtk_free_image_data(imgData);
@@ -535,6 +546,150 @@ extern "C" {
     
     dcmtk_free_media_upload_result(uploadResult);
     result(resultDict);
+    
+  } else if ([@"uploadVideo" isEqualToString:call.method]) {
+    NSString* serverHost = call.arguments[@"serverHost"];
+    NSNumber* serverPort = call.arguments[@"serverPort"];
+    NSString* aeTitle = call.arguments[@"aeTitle"];
+    NSString* calledAeTitle = call.arguments[@"calledAeTitle"];
+    NSString* patientId = call.arguments[@"patientId"];
+    NSString* videoPath = call.arguments[@"videoPath"];
+    NSString* studyDescription = call.arguments[@"studyDescription"];
+    NSString* seriesDescription = call.arguments[@"seriesDescription"];
+    NSString* imageComments = call.arguments[@"imageComments"];
+    NSString* modality = call.arguments[@"modality"];
+    
+    if (serverHost == nil || serverPort == nil || aeTitle == nil || calledAeTitle == nil || patientId == nil || videoPath == nil) {
+      result([FlutterError errorWithCode:@"INVALID_ARGUMENT"
+                                 message:@"Server host, port, AE title, called AE title, patient ID, and video path are required"
+                                 details:nil]);
+      return;
+    }
+    
+    MediaUploadResult* uploadResult = dcmtk_upload_video(
+      [serverHost UTF8String], [serverPort intValue], [aeTitle UTF8String], [calledAeTitle UTF8String],
+      [patientId UTF8String], [videoPath UTF8String],
+      studyDescription ? [studyDescription UTF8String] : "Uploaded Video",
+      seriesDescription ? [seriesDescription UTF8String] : "Uploaded Video Series",
+      imageComments ? [imageComments UTF8String] : "",
+      modality ? [modality UTF8String] : "SC");
+    
+    if (!uploadResult->success) {
+      NSString* errorMsg = uploadResult->error_message ?
+          [NSString stringWithUTF8String:uploadResult->error_message] : @"Unknown upload error";
+      dcmtk_free_media_upload_result(uploadResult);
+      result([FlutterError errorWithCode:@"UPLOAD_ERROR" message:errorMsg details:nil]);
+      return;
+    }
+    
+    NSDictionary* resultDict = @{
+      @"success": @(uploadResult->success),
+      @"studyInstanceUID": uploadResult->study_instance_uid ? [NSString stringWithUTF8String:uploadResult->study_instance_uid] : @"",
+      @"seriesInstanceUID": uploadResult->series_instance_uid ? [NSString stringWithUTF8String:uploadResult->series_instance_uid] : @"",
+      @"sopInstanceUID": uploadResult->sop_instance_uid ? [NSString stringWithUTF8String:uploadResult->sop_instance_uid] : @""
+    };
+    dcmtk_free_media_upload_result(uploadResult);
+    result(resultDict);
+    
+  } else if ([@"queryInstancesForSeries" isEqualToString:call.method]) {
+    NSString* serverHost = call.arguments[@"serverHost"];
+    NSNumber* serverPort = call.arguments[@"serverPort"];
+    NSString* aeTitle = call.arguments[@"aeTitle"];
+    NSString* calledAeTitle = call.arguments[@"calledAeTitle"];
+    NSString* seriesInstanceUID = call.arguments[@"seriesInstanceUID"];
+    
+    if (serverHost == nil || serverPort == nil || aeTitle == nil || calledAeTitle == nil || seriesInstanceUID == nil) {
+      result([FlutterError errorWithCode:@"INVALID_ARGUMENT"
+                                 message:@"Server host, port, AE title, called AE title, and series instance UID are required"
+                                 details:nil]);
+      return;
+    }
+    
+    DicomInstanceQueryResult* instResult = dcmtk_query_instances_for_series(
+      [serverHost UTF8String], [serverPort intValue], [aeTitle UTF8String],
+      [calledAeTitle UTF8String], [seriesInstanceUID UTF8String]);
+    
+    if (instResult->error) {
+      NSString* errorMsg = instResult->error_message ?
+          [NSString stringWithUTF8String:instResult->error_message] : @"Unknown query error";
+      dcmtk_free_instance_query_result(instResult);
+      result([FlutterError errorWithCode:@"QUERY_ERROR" message:errorMsg details:nil]);
+      return;
+    }
+    
+    NSMutableArray* instanceArray = [NSMutableArray array];
+    for (int i = 0; i < instResult->instance_count; i++) {
+      DicomInstance* instance = &instResult->instances[i];
+      [instanceArray addObject:@{
+        @"sopInstanceUID": instance->sop_instance_uid ? [NSString stringWithUTF8String:instance->sop_instance_uid] : @"",
+        @"instanceNumber": instance->instance_number ? [NSString stringWithUTF8String:instance->instance_number] : @"",
+        @"filePath": instance->file_path ? [NSString stringWithUTF8String:instance->file_path] : @"",
+        @"contentType": instance->content_type ? [NSString stringWithUTF8String:instance->content_type] : @"IMAGE",
+        @"fileSize": @(instance->file_size)
+      }];
+    }
+    dcmtk_free_instance_query_result(instResult);
+    result(instanceArray);
+    
+  } else if ([@"getDicomTag" isEqualToString:call.method]) {
+    NSString* filePath = call.arguments[@"filePath"];
+    NSString* tagName = call.arguments[@"tagName"];
+    
+    if (filePath == nil || tagName == nil) {
+      result([FlutterError errorWithCode:@"INVALID_ARGUMENT"
+                                 message:@"File path and tag name are required"
+                                 details:nil]);
+      return;
+    }
+    
+    char* tagValue = dcmtk_get_dicom_tag([filePath UTF8String], [tagName UTF8String]);
+    NSString* resultStr = [NSString stringWithUTF8String:tagValue];
+    dcmtk_free_string(tagValue);
+    result(resultStr);
+    
+  } else if ([@"validateDicomFile" isEqualToString:call.method]) {
+    NSString* filePath = call.arguments[@"filePath"];
+    
+    if (filePath == nil) {
+      result([FlutterError errorWithCode:@"INVALID_ARGUMENT"
+                                 message:@"File path is required"
+                                 details:nil]);
+      return;
+    }
+    
+    int valid = dcmtk_validate_dicom_file([filePath UTF8String]);
+    result(@(valid == 1));
+    
+  } else if ([@"testServerConnectionTls" isEqualToString:call.method]) {
+    NSString* serverHost = call.arguments[@"serverHost"];
+    NSNumber* serverPort = call.arguments[@"serverPort"];
+    NSString* aeTitle = call.arguments[@"aeTitle"];
+    NSString* calledAeTitle = call.arguments[@"calledAeTitle"];
+    NSString* certFile = call.arguments[@"certFile"];
+    NSString* keyFile = call.arguments[@"keyFile"];
+    NSString* caFile = call.arguments[@"caFile"];
+    
+    if (serverHost == nil || serverPort == nil || aeTitle == nil || calledAeTitle == nil) {
+      result([FlutterError errorWithCode:@"INVALID_ARGUMENT"
+                                 message:@"Server host, port, AE title, and called AE title are required"
+                                 details:nil]);
+      return;
+    }
+    
+    int tlsResult = dcmtk_test_server_connection_tls(
+      [serverHost UTF8String], [serverPort intValue],
+      [aeTitle UTF8String], [calledAeTitle UTF8String],
+      certFile ? [certFile UTF8String] : "",
+      keyFile ? [keyFile UTF8String] : "",
+      caFile ? [caFile UTF8String] : "");
+    
+    if (tlsResult == -1) {
+      result([FlutterError errorWithCode:@"TLS_NOT_AVAILABLE"
+                                 message:@"TLS support not compiled (OpenSSL not available)"
+                                 details:nil]);
+    } else {
+      result(@(tlsResult == 1));
+    }
     
   } else {
     result(FlutterMethodNotImplemented);

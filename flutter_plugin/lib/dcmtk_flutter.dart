@@ -82,7 +82,8 @@ class DcmtkFlutter {
   }
 
   /// Extract image from DICOM file
-  /// Returns Map with 'width', 'height', and 'data' (Uint8List of grayscale pixels)
+  /// Returns Map with 'width', 'height', 'data' (Uint8List of RGBA pixels),
+  /// 'samplesPerPixel', 'bitsStored', 'totalFrames'
   Future<Map<String, dynamic>?> extractImage(String filePath, {int frameIndex = 0}) async {
     if (Platform.isIOS) {
       try {
@@ -94,6 +95,9 @@ class DcmtkFlutter {
           'width': result['width'] as int,
           'height': result['height'] as int,
           'data': result['data'] as Uint8List,
+          'samplesPerPixel': result['samplesPerPixel'] as int? ?? 1,
+          'bitsStored': result['bitsStored'] as int? ?? 8,
+          'totalFrames': result['totalFrames'] as int? ?? 1,
         };
       } on PlatformException catch (e) {
         print("Error extracting image: ${e.message}");
@@ -105,6 +109,38 @@ class DcmtkFlutter {
     } else {
       return null;
     }
+  }
+
+  /// Get a specific DICOM tag value from a file
+  /// tagName can be a group,element pair like "0010,0010" or a name like "PatientName"
+  Future<String> getDicomTag(String filePath, String tagName) async {
+    if (Platform.isIOS) {
+      try {
+        final String result = await _methodChannel.invokeMethod('getDicomTag', {
+          'filePath': filePath,
+          'tagName': tagName,
+        });
+        return result;
+      } on PlatformException catch (e) {
+        return 'Error: ${e.message}';
+      }
+    }
+    return 'Error: Platform not supported';
+  }
+
+  /// Validate if a file is a valid DICOM file
+  Future<bool> validateDicomFile(String filePath) async {
+    if (Platform.isIOS) {
+      try {
+        final bool result = await _methodChannel.invokeMethod('validateDicomFile', {
+          'filePath': filePath,
+        });
+        return result;
+      } on PlatformException {
+        return false;
+      }
+    }
+    return false;
   }
 
   /// Test connection to DICOM server
@@ -134,6 +170,38 @@ class DcmtkFlutter {
     } else {
       return false;
     }
+  }
+
+  /// Test TLS connection to DICOM server
+  /// Returns true if connection successful, false otherwise
+  /// Returns false and prints error if TLS is not available (OpenSSL not compiled in)
+  Future<bool> testServerConnectionTls({
+    required String serverHost,
+    required int serverPort,
+    required String aeTitle,
+    required String calledAeTitle,
+    String certFile = '',
+    String keyFile = '',
+    String caFile = '',
+  }) async {
+    if (Platform.isIOS) {
+      try {
+        final bool result = await _methodChannel.invokeMethod('testServerConnectionTls', {
+          'serverHost': serverHost,
+          'serverPort': serverPort,
+          'aeTitle': aeTitle,
+          'calledAeTitle': calledAeTitle,
+          'certFile': certFile,
+          'keyFile': keyFile,
+          'caFile': caFile,
+        });
+        return result;
+      } on PlatformException catch (e) {
+        print("Error testing TLS connection: ${e.message}");
+        return false;
+      }
+    }
+    return false;
   }
 
   /// Query patients from DICOM server
@@ -246,6 +314,35 @@ class DcmtkFlutter {
     } else {
       return [];
     }
+  }
+
+  /// Query instances for a specific series from DICOM server
+  Future<List<Map<String, dynamic>>> queryInstancesForSeries({
+    required String serverHost,
+    required int serverPort,
+    required String aeTitle,
+    required String calledAeTitle,
+    required String seriesInstanceUID,
+  }) async {
+    if (Platform.isIOS) {
+      try {
+        final List<dynamic> result = await _methodChannel.invokeMethod('queryInstancesForSeries', {
+          'serverHost': serverHost,
+          'serverPort': serverPort,
+          'aeTitle': aeTitle,
+          'calledAeTitle': calledAeTitle,
+          'seriesInstanceUID': seriesInstanceUID,
+        });
+        return result.map((item) {
+          if (item is Map) return Map<String, dynamic>.from(item);
+          return <String, dynamic>{};
+        }).toList();
+      } on PlatformException catch (e) {
+        print("Error querying instances: ${e.message}");
+        return [];
+      }
+    }
+    return [];
   }
 
   /// Download instances from a series using C-MOVE (native DICOM protocol)
@@ -390,15 +487,13 @@ class DcmtkFlutter {
   }) async {
     if (Platform.isIOS) {
       try {
-        // For now, treat video upload similar to image upload
-        // In a real implementation, this would handle video-specific DICOM objects
-        final dynamic result = await _methodChannel.invokeMethod('uploadImage', {
+        final dynamic result = await _methodChannel.invokeMethod('uploadVideo', {
           'serverHost': serverHost,
           'serverPort': serverPort,
           'aeTitle': aeTitle,
           'calledAeTitle': calledAeTitle,
           'patientId': patientId,
-          'imagePath': videoPath,  // Will be handled as media path
+          'videoPath': videoPath,
           'studyDescription': studyDescription,
           'seriesDescription': seriesDescription,
           'imageComments': imageComments,
