@@ -111,6 +111,32 @@ class DcmtkFlutter {
     }
   }
 
+  /// Extract video payload from a DICOM video file to an output file
+  /// Returns Map with 'outputPath', 'mimeType', 'fileSize', or null on error
+  Future<Map<String, dynamic>?> extractVideo(String dicomPath, String outputPath) async {
+    if (Platform.isIOS) {
+      try {
+        final Map<dynamic, dynamic> result = await _methodChannel.invokeMethod('extractVideo', {
+          'dicomPath': dicomPath,
+          'outputPath': outputPath,
+        });
+        return {
+          'outputPath': result['outputPath'] as String,
+          'mimeType': result['mimeType'] as String,
+          'fileSize': result['fileSize'] as int,
+        };
+      } on PlatformException catch (e) {
+        print("Error extracting video: ${e.message}");
+        return null;
+      }
+    } else if (Platform.isAndroid) {
+      // TODO: Implement Android video extraction
+      return null;
+    } else {
+      return null;
+    }
+  }
+
   /// Get a specific DICOM tag value from a file
   /// tagName can be a group,element pair like "0010,0010" or a name like "PatientName"
   Future<String> getDicomTag(String filePath, String tagName) async {
@@ -374,8 +400,8 @@ class DcmtkFlutter {
           return <String, dynamic>{};
         }).toList();
       } on PlatformException catch (e) {
-        print("Error downloading instances via C-MOVE: ${e.message}");
-        return [];
+        print("Error downloading instances via C-GET: ${e.message}");
+        rethrow;
       }
     } else if (Platform.isAndroid) {
       // TODO: Implement Android FFI C-MOVE download

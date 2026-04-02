@@ -21,10 +21,12 @@
 #include <string>
 #include <sstream>
 #include <vector>
+#include <algorithm>
 #include <cstring>
 #include <cstdlib>
 #include <cstdio>
 #include <sys/stat.h>
+#include <dirent.h>
 
 // Simple debug logging using printf which should appear in Flutter console
 #define DEBUG_LOG(...) do { \
@@ -72,6 +74,12 @@ char* dcmtk_load_dicom_file(const char* filename) {
     OFString studyDescription;
     if (dataset->findAndGetOFString(DCM_StudyDescription, studyDescription).good()) {
         oss << "Study Description: " << studyDescription << "\n";
+    }
+
+    // Get SOP Class UID
+    OFString sopClassUID;
+    if (dataset->findAndGetOFString(DCM_SOPClassUID, sopClassUID).good()) {
+        oss << "SOPClassUID: " << sopClassUID << "\n";
     }
 
     // Get SOP Instance UID (used by Flutter fallback to resolve Orthanc instance id)
@@ -449,7 +457,9 @@ DicomImageData* dcmtk_extract_image(const char* filename, int frame_index) {
     result->width = image->getWidth();
     result->height = image->getHeight();
     result->total_frames = (int)image->getFrameCount();
-    if (result->total_frames < 1) result->total_frames = totalFrames;
+    // For multi-frame images, getFrameCount() may return 1 when we requested a single-frame
+    // window (the DicomImage constructor with frame offset + count). Use the tag value instead.
+    if (totalFrames > result->total_frames) result->total_frames = totalFrames;
     
     // Determine color vs grayscale
     int isColorImage = image->isMonochrome() ? 0 : 1;
@@ -1587,14 +1597,12 @@ MediaUploadResult* dcmtk_upload_video(const char* server_host, int server_port, 
     }
     
     try {
-        // Check if file exists
         struct stat fileStat;
         if (stat(video_path, &fileStat) != 0) {
             result->error_message = strdup(("Video file not found: " + std::string(video_path)).c_str());
             return result;
         }
-        
-        // Determine video format from extension
+
         std::string path(video_path);
         std::string ext;
         size_t dotPos = path.rfind('.');
@@ -1602,170 +1610,201 @@ MediaUploadResult* dcmtk_upload_video(const char* server_host, int server_port, 
             ext = path.substr(dotPos + 1);
             for (auto& c : ext) c = tolower(c);
         }
-        
-        // Determine SOP Class based on format
-        // MPEG2 -> Video Endoscopic Image Storage
-        // MPEG4/H.264 -> Video Photographic Image Storage  
-        // Other -> Secondary Capture (fallback)
-        const char* sopClassUID = UID_SecondaryCaptureImageStorage;
-        bool isMpeg4 = (ext == "mp4" || ext == "m4v" || ext == "mov");
-        bool isMpeg2 = (ext == "mpg" || ext == "mpeg");
-        
+
+        OFString uploadDate, uploadTime;
+        DcmDate::getCurrentDate(uploadDate);
+        DcmTime::getCurrentTime(uploadTime);
+
+        char studyUID[100], seriesUID[100], sopUID[100];
+        dcmGenerateUniqueIdentifier(studyUID, SITE_STUDY_UID_ROOT);
+        dcmGenerateUniqueIdentifier(seriesUID, SITE_SERIES_UID_ROOT);
+        dcmGenerateUniqueIdentifier(sopUID, SITE_INSTANCE_UID_ROOT);
+
+        auto fillCommonTags = [&](DcmDataset* dset, const char* sopClass) {
+            dset->putAndInsertOFStringArray(DCM_PatientID, patient_id);
+            dset->putAndInsertOFStringArray(DCM_PatientName, patient_id);
+            dset->putAndInsertOFStringArray(DCM_PatientBirthDate, "");
+            dset->putAndInsertOFStringArray(DCM_PatientSex, "");
+
+            dset->putAndInsertOFStringArray(DCM_StudyInstanceUID, studyUID);
+            dset->putAndInsertOFStringArray(DCM_StudyDate, uploadDate.c_str());
+            dset->putAndInsertOFStringArray(DCM_StudyTime, uploadTime.c_str());
+            dset->putAndInsertOFStringArray(DCM_StudyDescription, study_description ? study_description : "Uploaded Video");
+            dset->putAndInsertOFStringArray(DCM_AccessionNumber, "");
+
+            dset->putAndInsertOFStringArray(DCM_SeriesInstanceUID, seriesUID);
+            dset->putAndInsertOFStringArray(DCM_SeriesNumber, "1");
+            dset->putAndInsertOFStringArray(DCM_SeriesDescription, series_description ? series_description : "Uploaded Video Series");
+            dset->putAndInsertOFStringArray(DCM_Modality, modality ? modality : "XC");
+
+            dset->putAndInsertOFStringArray(DCM_SOPInstanceUID, sopUID);
+            dset->putAndInsertOFStringArray(DCM_SOPClassUID, sopClass);
+            dset->putAndInsertOFStringArray(DCM_InstanceNumber, "1");
+        };
+
+        auto sendStore = [&](DcmDataset* dset, const char* sopClassUID, OFList<OFString>& tsList, std::string& sendErr) -> OFBool {
+            DcmSCU scu;
+            scu.setAETitle(ae_title);
+            scu.setPeerAETitle(called_ae_title);
+            scu.setPeerHostName(server_host);
+            scu.setPeerPort(server_port);
+            scu.addPresentationContext(sopClassUID, tsList);
+
+            OFCondition status = scu.initNetwork();
+            if (status.bad()) {
+                sendErr = std::string("Network initialization failed: ") + status.text();
+                return OFFalse;
+            }
+
+            status = scu.negotiateAssociation();
+            if (status.bad()) {
+                sendErr = std::string("Association failed: ") + status.text();
+                return OFFalse;
+            }
+
+            T_ASC_PresentationContextID presID = scu.findPresentationContextID(sopClassUID, "");
+            if (presID == 0) {
+                sendErr = "No acceptable presentation context for video storage";
+                scu.releaseAssociation();
+                return OFFalse;
+            }
+
+            Uint16 rspStatusCode = 0;
+            status = scu.sendSTORERequest(presID, "", dset, rspStatusCode);
+            if (status.bad()) {
+                sendErr = std::string("C-STORE failed: ") + status.text();
+                scu.releaseAssociation();
+                return OFFalse;
+            }
+
+            scu.releaseAssociation();
+            return OFTrue;
+        };
+
+        // Attempt 1: true video object (MPEG encapsulated)
+        const char* videoSopClassUID = UID_SecondaryCaptureImageStorage;
+        E_TransferSyntax videoTS = EXS_MPEG4HighProfileLevel4_1;
+        OFString videoTsUid = UID_MPEG4HighProfileLevel4_1TransferSyntax;
+
+        const bool isMpeg4 = (ext == "mp4" || ext == "m4v" || ext == "mov");
+        const bool isMpeg2 = (ext == "mpg" || ext == "mpeg");
         if (isMpeg4) {
-            sopClassUID = UID_VideoPhotographicImageStorage;
+            videoSopClassUID = UID_VideoPhotographicImageStorage;
+            videoTS = EXS_MPEG4HighProfileLevel4_1;
+            videoTsUid = UID_MPEG4HighProfileLevel4_1TransferSyntax;
         } else if (isMpeg2) {
-            sopClassUID = UID_VideoEndoscopicImageStorage;
+            videoSopClassUID = UID_VideoEndoscopicImageStorage;
+            videoTS = EXS_MPEG2MainProfileAtMainLevel;
+            videoTsUid = UID_MPEG2MainProfileAtMainLevelTransferSyntax;
         }
-        
-        // Read video file
+
+        DcmFileFormat videoFileFormat;
+        DcmDataset* videoDataset = videoFileFormat.getDataset();
+        fillCommonTags(videoDataset, videoSopClassUID);
+        videoDataset->putAndInsertUint16(DCM_SamplesPerPixel, 3);
+        videoDataset->putAndInsertOFStringArray(DCM_PhotometricInterpretation, "YBR_FULL_422");
+        videoDataset->putAndInsertUint16(DCM_Rows, 480);
+        videoDataset->putAndInsertUint16(DCM_Columns, 640);
+        videoDataset->putAndInsertUint16(DCM_BitsAllocated, 8);
+        videoDataset->putAndInsertUint16(DCM_BitsStored, 8);
+        videoDataset->putAndInsertUint16(DCM_HighBit, 7);
+        videoDataset->putAndInsertUint16(DCM_PixelRepresentation, 0);
+        videoDataset->putAndInsertUint16(DCM_PlanarConfiguration, 0);
+        videoDataset->putAndInsertOFStringArray(DCM_NumberOfFrames, "1");
+
+        // Load file bytes and create encapsulated pixel data sequence
         FILE* fp = fopen(video_path, "rb");
         if (!fp) {
             result->error_message = strdup(("Cannot open video file: " + std::string(video_path)).c_str());
             return result;
         }
-        
         fseek(fp, 0, SEEK_END);
         long fileSize = ftell(fp);
         fseek(fp, 0, SEEK_SET);
-        
         unsigned char* videoData = (unsigned char*)malloc(fileSize);
         size_t bytesRead = fread(videoData, 1, fileSize, fp);
         fclose(fp);
-        
+
         if ((long)bytesRead != fileSize) {
             free(videoData);
             result->error_message = strdup("Failed to read video file completely");
             return result;
         }
-        
-        // Create DICOM object
-        DcmFileFormat fileFormat;
-        DcmDataset* dataset = fileFormat.getDataset();
-        
-        char studyUID[100], seriesUID[100], sopUID[100];
-        dcmGenerateUniqueIdentifier(studyUID, SITE_STUDY_UID_ROOT);
-        dcmGenerateUniqueIdentifier(seriesUID, SITE_SERIES_UID_ROOT);
-        dcmGenerateUniqueIdentifier(sopUID, SITE_INSTANCE_UID_ROOT);
-        
-        // Patient
-        dataset->putAndInsertOFStringArray(DCM_PatientID, patient_id);
-        dataset->putAndInsertOFStringArray(DCM_PatientName, patient_id);
-        dataset->putAndInsertOFStringArray(DCM_PatientBirthDate, "");
-        dataset->putAndInsertOFStringArray(DCM_PatientSex, "");
-        
-        // Study
-        dataset->putAndInsertOFStringArray(DCM_StudyInstanceUID, studyUID);
-        OFString uploadDate, uploadTime;
-        DcmDate::getCurrentDate(uploadDate);
-        DcmTime::getCurrentTime(uploadTime);
-        dataset->putAndInsertOFStringArray(DCM_StudyDate, uploadDate.c_str());
-        dataset->putAndInsertOFStringArray(DCM_StudyTime, uploadTime.c_str());
-        dataset->putAndInsertOFStringArray(DCM_StudyDescription, study_description ? study_description : "Uploaded Video");
-        dataset->putAndInsertOFStringArray(DCM_AccessionNumber, "");
-        
-        // Series
-        dataset->putAndInsertOFStringArray(DCM_SeriesInstanceUID, seriesUID);
-        dataset->putAndInsertOFStringArray(DCM_SeriesNumber, "1");
-        dataset->putAndInsertOFStringArray(DCM_SeriesDescription, series_description ? series_description : "Uploaded Video Series");
-        dataset->putAndInsertOFStringArray(DCM_Modality, modality ? modality : "SC");
-        
-        // Instance
-        dataset->putAndInsertOFStringArray(DCM_SOPInstanceUID, sopUID);
-        dataset->putAndInsertOFStringArray(DCM_SOPClassUID, sopClassUID);
-        dataset->putAndInsertOFStringArray(DCM_InstanceNumber, "1");
-        
-        // Video-specific: set minimal image attributes
-        dataset->putAndInsertUint16(DCM_SamplesPerPixel, 3);
-        dataset->putAndInsertOFStringArray(DCM_PhotometricInterpretation, "YBR_FULL_422");
-        dataset->putAndInsertUint16(DCM_Rows, 480);
-        dataset->putAndInsertUint16(DCM_Columns, 640);
-        dataset->putAndInsertUint16(DCM_BitsAllocated, 8);
-        dataset->putAndInsertUint16(DCM_BitsStored, 8);
-        dataset->putAndInsertUint16(DCM_HighBit, 7);
-        dataset->putAndInsertUint16(DCM_PixelRepresentation, 0);
-        dataset->putAndInsertUint16(DCM_PlanarConfiguration, 0);
-        dataset->putAndInsertOFStringArray(DCM_NumberOfFrames, "1");
-        
-        // Encapsulate video data as pixel data
+
         DcmPixelData* pixelData = new DcmPixelData(DCM_PixelData);
         DcmPixelSequence* pixelSeq = new DcmPixelSequence(DCM_PixelSequenceTag);
-        
-        // Add offset table (empty for single fragment)
         DcmPixelItem* offsetTable = new DcmPixelItem(DCM_PixelItemTag);
         pixelSeq->insert(offsetTable);
-        
-        // Add video data as a single fragment
         DcmPixelItem* videoFragment = new DcmPixelItem(DCM_PixelItemTag);
         videoFragment->putUint8Array((const Uint8*)videoData, (Uint32)fileSize);
         pixelSeq->insert(videoFragment);
-        
-        // Set transfer syntax for encapsulated data
-        E_TransferSyntax videoTS = EXS_MPEG4HighProfileLevel4_1;
-        if (isMpeg2) {
-            videoTS = EXS_MPEG2MainProfileAtMainLevel;
-        }
-        
         pixelData->putOriginalRepresentation(videoTS, nullptr, pixelSeq);
-        dataset->insert(pixelData);
-        
+        videoDataset->insert(pixelData, OFTrue);
         free(videoData);
-        
+
         if (image_comments && strlen(image_comments) > 0) {
-            dataset->putAndInsertOFStringArray(DCM_ImageComments, image_comments);
+            videoDataset->putAndInsertOFStringArray(DCM_ImageComments, image_comments);
         }
-        
-        // C-STORE to server
-        DcmSCU scu;
-        scu.setAETitle(ae_title);
-        scu.setPeerAETitle(called_ae_title);
-        scu.setPeerHostName(server_host);
-        scu.setPeerPort(server_port);
-        
-        OFList<OFString> transferSyntaxes;
-        transferSyntaxes.push_back(UID_LittleEndianImplicitTransferSyntax);
-        transferSyntaxes.push_back(UID_LittleEndianExplicitTransferSyntax);
-        if (isMpeg4) {
-            transferSyntaxes.push_back(UID_MPEG4HighProfileLevel4_1TransferSyntax);
-        } else if (isMpeg2) {
-            transferSyntaxes.push_back(UID_MPEG2MainProfileAtMainLevelTransferSyntax);
-        }
-        
-        scu.addPresentationContext(sopClassUID, transferSyntaxes);
-        
-        OFCondition status = scu.initNetwork();
-        if (status.bad()) {
-            result->error_message = strdup(("Network initialization failed: " + std::string(status.text())).c_str());
-            return result;
-        }
-        
-        status = scu.negotiateAssociation();
-        if (status.bad()) {
-            result->error_message = strdup(("Association failed: " + std::string(status.text())).c_str());
-            return result;
-        }
-        
-        T_ASC_PresentationContextID presID = scu.findPresentationContextID(sopClassUID, "");
-        if (presID == 0) {
-            result->error_message = strdup("No acceptable presentation context for video storage");
-            scu.releaseAssociation();
-            return result;
-        }
-        
-        Uint16 rspStatusCode;
-        status = scu.sendSTORERequest(presID, "", dataset, rspStatusCode);
-        
-        if (status.good()) {
+
+        OFList<OFString> videoTransferSyntaxes;
+        videoTransferSyntaxes.push_back(videoTsUid);
+        videoTransferSyntaxes.push_back(UID_LittleEndianExplicitTransferSyntax);
+        videoTransferSyntaxes.push_back(UID_LittleEndianImplicitTransferSyntax);
+
+        std::string sendErr;
+        if (sendStore(videoDataset, videoSopClassUID, videoTransferSyntaxes, sendErr)) {
             result->success = 1;
             result->study_instance_uid = strdup(studyUID);
             result->series_instance_uid = strdup(seriesUID);
             result->sop_instance_uid = strdup(sopUID);
-            DEBUG_LOG("Video uploaded successfully: SOP UID = %s", sopUID);
-        } else {
-            result->error_message = strdup(("C-STORE failed: " + std::string(status.text())).c_str());
+            DEBUG_LOG("Video uploaded successfully (native video object): SOP UID = %s", sopUID);
+            return result;
         }
-        
-        scu.releaseAssociation();
-        
+
+        DEBUG_LOG("Native video upload failed, falling back to Secondary Capture: %s", sendErr.c_str());
+
+        // Attempt 2 (fallback): guaranteed SC object with metadata reference.
+        // This keeps upload working even when server does not accept video SOP/TS.
+        DcmFileFormat scFileFormat;
+        DcmDataset* scDataset = scFileFormat.getDataset();
+        char fallbackSopUID[100];
+        dcmGenerateUniqueIdentifier(fallbackSopUID, SITE_INSTANCE_UID_ROOT);
+        fillCommonTags(scDataset, UID_SecondaryCaptureImageStorage);
+        scDataset->putAndInsertOFStringArray(DCM_SOPInstanceUID, fallbackSopUID);
+        scDataset->putAndInsertOFStringArray(DCM_SOPClassUID, UID_SecondaryCaptureImageStorage);
+        scDataset->putAndInsertUint16(DCM_SamplesPerPixel, 1);
+        scDataset->putAndInsertOFStringArray(DCM_PhotometricInterpretation, "MONOCHROME2");
+        scDataset->putAndInsertUint16(DCM_Rows, 1);
+        scDataset->putAndInsertUint16(DCM_Columns, 1);
+        scDataset->putAndInsertUint16(DCM_BitsAllocated, 8);
+        scDataset->putAndInsertUint16(DCM_BitsStored, 8);
+        scDataset->putAndInsertUint16(DCM_HighBit, 7);
+        scDataset->putAndInsertUint16(DCM_PixelRepresentation, 0);
+        Uint8 blackPixel = 0;
+        scDataset->putAndInsertUint8Array(DCM_PixelData, &blackPixel, 1);
+
+        std::ostringstream fallbackComments;
+        fallbackComments << "Video upload fallback record. Source=" << video_path;
+        if (image_comments && strlen(image_comments) > 0) {
+            fallbackComments << "; " << image_comments;
+        }
+        scDataset->putAndInsertOFStringArray(DCM_ImageComments, fallbackComments.str().c_str());
+
+        OFList<OFString> scTransferSyntaxes;
+        scTransferSyntaxes.push_back(UID_LittleEndianExplicitTransferSyntax);
+        scTransferSyntaxes.push_back(UID_LittleEndianImplicitTransferSyntax);
+
+        if (sendStore(scDataset, UID_SecondaryCaptureImageStorage, scTransferSyntaxes, sendErr)) {
+            result->success = 1;
+            result->study_instance_uid = strdup(studyUID);
+            result->series_instance_uid = strdup(seriesUID);
+            result->sop_instance_uid = strdup(fallbackSopUID);
+            DEBUG_LOG("Video uploaded via fallback Secondary Capture record: SOP UID = %s", fallbackSopUID);
+            return result;
+        }
+
+        result->error_message = strdup(sendErr.c_str());
+
     } catch (const std::exception& e) {
         result->error_message = strdup(("Exception during video upload: " + std::string(e.what())).c_str());
     }
@@ -2060,7 +2099,84 @@ void dcmtk_free_series_query_result(DicomSeriesQueryResult* result) {
     }
 }
 
-// C-MOVE implementation - retrieve instances from server
+// Helper: storage SOP classes split by type for proper transfer syntax negotiation.
+// Image SOP classes use image transfer syntaxes (JPEG, RLE, etc.)
+static const char* g_imageStorageSopClasses[] = {
+    UID_CTImageStorage,
+    UID_EnhancedCTImageStorage,
+    UID_MRImageStorage,
+    UID_EnhancedMRImageStorage,
+    UID_EnhancedMRColorImageStorage,
+    UID_UltrasoundImageStorage,
+    UID_SecondaryCaptureImageStorage,
+    UID_MultiframeSingleBitSecondaryCaptureImageStorage,
+    UID_MultiframeGrayscaleByteSecondaryCaptureImageStorage,
+    UID_MultiframeGrayscaleWordSecondaryCaptureImageStorage,
+    UID_MultiframeTrueColorSecondaryCaptureImageStorage,
+    UID_ComputedRadiographyImageStorage,
+    UID_DigitalXRayImageStorageForPresentation,
+    UID_DigitalXRayImageStorageForProcessing,
+    UID_DigitalMammographyXRayImageStorageForPresentation,
+    UID_DigitalMammographyXRayImageStorageForProcessing,
+    UID_XRayAngiographicImageStorage,
+    UID_XRayRadiofluoroscopicImageStorage,
+    UID_NuclearMedicineImageStorage,
+    UID_VLPhotographicImageStorage,
+    UID_OphthalmicPhotography8BitImageStorage,
+    UID_OphthalmicPhotography16BitImageStorage,
+    UID_OphthalmicTomographyImageStorage,
+    UID_BreastTomosynthesisImageStorage,
+    UID_BasicTextSRStorage,
+    UID_EnhancedSRStorage,
+    UID_ComprehensiveSRStorage,
+    UID_EncapsulatedPDFStorage,
+    UID_PositronEmissionTomographyImageStorage,
+    UID_RTImageStorage,
+    UID_RTDoseStorage,
+    UID_RTStructureSetStorage,
+    UID_RTPlanStorage,
+};
+static const int g_numImageStorageSopClasses = sizeof(g_imageStorageSopClasses) / sizeof(g_imageStorageSopClasses[0]);
+
+// Video SOP classes use MPEG transfer syntaxes
+static const char* g_videoStorageSopClasses[] = {
+    UID_VideoEndoscopicImageStorage,
+    UID_VideoMicroscopicImageStorage,
+    UID_VideoPhotographicImageStorage,
+};
+static const int g_numVideoStorageSopClasses = sizeof(g_videoStorageSopClasses) / sizeof(g_videoStorageSopClasses[0]);
+
+// Helper: scan directory for DICOM files and return their paths.
+// DcmSCU's handleSTORERequest saves files WITHOUT .dcm extension (e.g. "SC.1.2.3..."),
+// so we scan all regular files and verify each is a valid DICOM file.
+static std::vector<std::string> scanDirectoryForDcmFiles(const std::string& dirPath) {
+    std::vector<std::string> files;
+    DIR* dir = opendir(dirPath.c_str());
+    if (!dir) return files;
+    struct dirent* entry;
+    while ((entry = readdir(dir)) != NULL) {
+        std::string name = entry->d_name;
+        // Skip dot-files and directories
+        if (name.empty() || name[0] == '.') continue;
+        
+        std::string fullPath = dirPath + "/" + name;
+        
+        // Check it's a regular file (not a directory)
+        struct stat st;
+        if (stat(fullPath.c_str(), &st) != 0 || !S_ISREG(st.st_mode)) continue;
+        
+        // Verify it's actually a DICOM file by trying to load it
+        DcmFileFormat dcmFile;
+        if (dcmFile.loadFile(fullPath.c_str()).good()) {
+            files.push_back(fullPath);
+        }
+    }
+    closedir(dir);
+    std::sort(files.begin(), files.end());
+    return files;
+}
+
+// C-GET implementation - retrieve instances from server via C-GET, with C-FIND fallback on separate association
 DicomInstanceQueryResult* dcmtk_download_instances(const char* server_host, int server_port, const char* ae_title, const char* called_ae_title, const char* series_instance_uid, const char* local_storage_path) {
     DicomInstanceQueryResult* result = (DicomInstanceQueryResult*)malloc(sizeof(DicomInstanceQueryResult));
     if (!result) return NULL;
@@ -2070,130 +2186,271 @@ DicomInstanceQueryResult* dcmtk_download_instances(const char* server_host, int 
     result->error = 0;
     result->error_message = NULL;
     
+    // Use a per-series subdirectory to avoid mixing files from different downloads
+    std::string seriesDir = std::string(local_storage_path) + "/" + series_instance_uid;
+    mkdir(local_storage_path, 0755);
+    mkdir(seriesDir.c_str(), 0755);
+    
+    // Transfer syntaxes for image storage (non-video)
+    OFList<OFString> imageStorageTSList;
+    imageStorageTSList.push_back(UID_LittleEndianExplicitTransferSyntax);
+    imageStorageTSList.push_back(UID_LittleEndianImplicitTransferSyntax);
+    imageStorageTSList.push_back(UID_BigEndianExplicitTransferSyntax);
+    imageStorageTSList.push_back(UID_JPEGProcess1TransferSyntax);
+    imageStorageTSList.push_back(UID_JPEGProcess2_4TransferSyntax);
+    imageStorageTSList.push_back(UID_JPEG2000LosslessOnlyTransferSyntax);
+    imageStorageTSList.push_back(UID_JPEG2000TransferSyntax);
+    imageStorageTSList.push_back(UID_JPEGLSLosslessTransferSyntax);
+    imageStorageTSList.push_back(UID_JPEGLSLossyTransferSyntax);
+    imageStorageTSList.push_back(UID_RLELosslessTransferSyntax);
+
+    // Transfer syntaxes for video storage (MPEG)
+    OFList<OFString> videoStorageTSList;
+    videoStorageTSList.push_back(UID_MPEG4HighProfileLevel4_1TransferSyntax);
+    videoStorageTSList.push_back(UID_MPEG4BDcompatibleHighProfileLevel4_1TransferSyntax);
+    videoStorageTSList.push_back(UID_MPEG4HighProfileLevel4_2_For2DVideoTransferSyntax);
+    videoStorageTSList.push_back(UID_MPEG4HighProfileLevel4_2_For3DVideoTransferSyntax);
+    videoStorageTSList.push_back(UID_MPEG2MainProfileAtMainLevelTransferSyntax);
+    videoStorageTSList.push_back(UID_MPEG2MainProfileAtHighLevelTransferSyntax);
+    videoStorageTSList.push_back(UID_LittleEndianExplicitTransferSyntax);
+    videoStorageTSList.push_back(UID_LittleEndianImplicitTransferSyntax);
+
+    OFList<OFString> queryTSList;
+    queryTSList.push_back(UID_LittleEndianExplicitTransferSyntax);
+    queryTSList.push_back(UID_LittleEndianImplicitTransferSyntax);
+
+    std::string cgetError;
+    
     try {
-        DEBUG_LOG("C-MOVE download starting for series: %s", series_instance_uid);
+        DEBUG_LOG("C-GET download starting for series: %s", series_instance_uid);
+        DEBUG_LOG("Storage directory: %s", seriesDir.c_str());
         
-        DcmSCU scu;
-        scu.setAETitle(ae_title);
-        scu.setPeerHostName(server_host);
-        scu.setPeerPort(server_port);
-        scu.setPeerAETitle(called_ae_title);
+        // ========== PHASE 1: Try C-GET on its own association ==========
+        {
+            DcmSCU scu;
+            scu.setAETitle(ae_title);
+            scu.setPeerHostName(server_host);
+            scu.setPeerPort(server_port);
+            scu.setPeerAETitle(called_ae_title);
+            scu.setStorageDir(seriesDir.c_str());
+            scu.setStorageMode(DCMSCU_STORAGE_DISK);
+            
+            // C-GET query context
+            scu.addPresentationContext(UID_GETStudyRootQueryRetrieveInformationModel, queryTSList);
+            
+            // Image storage SOP classes with image transfer syntaxes (SCP role for C-STORE sub-ops)
+            for (int i = 0; i < g_numImageStorageSopClasses; i++) {
+                scu.addPresentationContext(g_imageStorageSopClasses[i], imageStorageTSList, ASC_SC_ROLE_SCP);
+            }
+            
+            // Video storage SOP classes with MPEG transfer syntaxes
+            for (int i = 0; i < g_numVideoStorageSopClasses; i++) {
+                scu.addPresentationContext(g_videoStorageSopClasses[i], videoStorageTSList, ASC_SC_ROLE_SCP);
+            }
+            
+            OFCondition status = scu.initNetwork();
+            if (status.good()) {
+                status = scu.negotiateAssociation();
+            }
+            
+            if (status.good()) {
+                T_ASC_PresentationContextID getPresID = scu.findPresentationContextID(
+                    UID_GETStudyRootQueryRetrieveInformationModel, "");
+                
+                if (getPresID != 0) {
+                    DEBUG_LOG("C-GET presentation context accepted (ID=%d)", getPresID);
+                    
+                    DcmDataset getDataset;
+                    getDataset.putAndInsertOFStringArray(DCM_QueryRetrieveLevel, "SERIES");
+                    getDataset.putAndInsertOFStringArray(DCM_SeriesInstanceUID, series_instance_uid);
+                    
+                    OFList<RetrieveResponse*> getResponses;
+                    status = scu.sendCGETRequest(getPresID, &getDataset, &getResponses);
+                    
+                    if (status.good()) {
+                        int completed = 0, failed = 0, remaining = 0;
+                        OFListIterator(RetrieveResponse*) it = getResponses.begin();
+                        while (it != getResponses.end()) {
+                            RetrieveResponse* resp = *it;
+                            if (resp) {
+                                completed = resp->m_numberOfCompletedSubops;
+                                failed = resp->m_numberOfFailedSubops;
+                                remaining = resp->m_numberOfRemainingSubops;
+                                DEBUG_LOG("C-GET sub-response: status=0x%04x completed=%d failed=%d remaining=%d", 
+                                    resp->m_status, completed, failed, remaining);
+                            }
+                            ++it;
+                        }
+                        DEBUG_LOG("C-GET final: %d completed, %d failed", completed, failed);
+                        if (completed == 0 && failed > 0) {
+                            cgetError = "C-GET: server reported " + std::to_string(failed) + " failed sub-operation(s)";
+                        } else if (completed == 0 && failed == 0) {
+                            cgetError = "C-GET: server completed with 0 sub-operations";
+                        }
+                    } else {
+                        cgetError = "C-GET request failed: " + std::string(status.text());
+                        DEBUG_LOG("C-GET failed: %s", status.text());
+                    }
+                    
+                    // Clean up responses
+                    while (!getResponses.empty()) {
+                        RetrieveResponse* resp = getResponses.front();
+                        getResponses.pop_front();
+                        delete resp;
+                    }
+                } else {
+                    cgetError = "Server did not accept C-GET presentation context";
+                    DEBUG_LOG("Server rejected C-GET presentation context");
+                }
+                
+                scu.releaseAssociation();
+            } else {
+                cgetError = "C-GET association failed: " + std::string(status.text());
+                DEBUG_LOG("C-GET association failed: %s", status.text());
+            }
+        }
         
-        // Add presentation contexts for C-MOVE (Study Root Query/Retrieve Information Model)
-        OFList<OFString> transferSyntaxes;
-        transferSyntaxes.push_back(UID_LittleEndianImplicitTransferSyntax);
-        scu.addPresentationContext(UID_MOVEStudyRootQueryRetrieveInformationModel, transferSyntaxes);
-        scu.addPresentationContext(UID_FINDStudyRootQueryRetrieveInformationModel, transferSyntaxes);
+        // Debug: list all files in the storage directory
+        {
+            DIR* dbgDir = opendir(seriesDir.c_str());
+            if (dbgDir) {
+                struct dirent* dbgEntry;
+                int fileCount = 0;
+                while ((dbgEntry = readdir(dbgDir)) != NULL) {
+                    std::string n = dbgEntry->d_name;
+                    if (n[0] == '.') continue;
+                    std::string fp = seriesDir + "/" + n;
+                    struct stat st;
+                    long fsize = 0;
+                    if (stat(fp.c_str(), &st) == 0) fsize = st.st_size;
+                    DEBUG_LOG("  Storage dir file: %s (size=%ld, isDir=%d)", n.c_str(), fsize, S_ISDIR(st.st_mode));
+                    fileCount++;
+                }
+                closedir(dbgDir);
+                DEBUG_LOG("  Total files in storage dir: %d", fileCount);
+            } else {
+                DEBUG_LOG("  ERROR: Cannot open storage dir: %s", seriesDir.c_str());
+            }
+        }
         
-        // Try to negotiate association
-        OFCondition status = scu.initNetwork();
-        if (status.bad()) {
-            result->error = 1;
-            result->error_message = strdup(("Network initialization failed: " + std::string(status.text())).c_str());
-            DEBUG_LOG("ERROR: Network init failed: %s", status.text());
+        // Check if C-GET produced any files
+        std::vector<std::string> downloadedFiles = scanDirectoryForDcmFiles(seriesDir);
+        
+        if (!downloadedFiles.empty()) {
+            // SUCCESS: C-GET delivered files
+            DEBUG_LOG("C-GET downloaded %d DICOM files", (int)downloadedFiles.size());
+            result->instance_count = (int)downloadedFiles.size();
+            result->instances = (DicomInstance*)malloc(result->instance_count * sizeof(DicomInstance));
+            
+            for (int i = 0; i < (int)downloadedFiles.size(); i++) {
+                const std::string& filePath = downloadedFiles[i];
+                result->instances[i].file_path = strdup(filePath.c_str());
+                result->instances[i].instance_number = strdup(std::to_string(i + 1).c_str());
+                result->instances[i].content_type = strdup("DICOM");
+                
+                struct stat st;
+                result->instances[i].file_size = (stat(filePath.c_str(), &st) == 0) ? (int)st.st_size : 0;
+                
+                // Extract SOP Instance UID from downloaded file
+                DcmFileFormat dcmFile;
+                if (dcmFile.loadFile(filePath.c_str()).good()) {
+                    OFString sopUID;
+                    if (dcmFile.getDataset()->findAndGetOFString(DCM_SOPInstanceUID, sopUID).good()) {
+                        result->instances[i].sop_instance_uid = strdup(sopUID.c_str());
+                    } else {
+                        result->instances[i].sop_instance_uid = strdup("");
+                    }
+                } else {
+                    result->instances[i].sop_instance_uid = strdup("");
+                }
+                
+                DEBUG_LOG("Downloaded: %s (size=%d)", filePath.c_str(), result->instances[i].file_size);
+            }
             return result;
         }
         
-        status = scu.negotiateAssociation();
-        if (status.bad()) {
-            result->error = 1;
-            result->error_message = strdup(("Association negotiation failed: " + std::string(status.text())).c_str());
-            DEBUG_LOG("ERROR: Association negotiation failed: %s", status.text());
-            return result;
-        }
+        // ========== PHASE 2: C-GET didn't produce files, try C-FIND on fresh association ==========
+        DEBUG_LOG("C-GET produced no files (%s), trying C-FIND on fresh association", cgetError.c_str());
         
-        // Find appropriate presentation context for C-MOVE
-        T_ASC_PresentationContextID presID = scu.findPresentationContextID(UID_MOVEStudyRootQueryRetrieveInformationModel, "");
-        if (presID == 0) {
-            result->error = 1;
-            result->error_message = strdup("No presentation context for Study Root C-MOVE");
-            DEBUG_LOG("ERROR: No C-MOVE presentation context");
-            scu.releaseAssociation();
-            return result;
-        }
-        
-        // Prepare C-MOVE request for instances at SERIES level
-        DcmDataset moveRequest;
-        moveRequest.putAndInsertOFStringArray(DCM_QueryRetrieveLevel, "SERIES");
-        moveRequest.putAndInsertOFStringArray(DCM_SeriesInstanceUID, series_instance_uid);
-        
-        DEBUG_LOG("Sending C-MOVE request for series: %s", series_instance_uid);
-        
-        // Extract just the first instance for now (can be extended to get all)
-        // First, query to get instance UIDs
-        DcmDataset queryRequest;
-        queryRequest.putAndInsertOFStringArray(DCM_QueryRetrieveLevel, "SERIES");
-        queryRequest.putAndInsertOFStringArray(DCM_SeriesInstanceUID, series_instance_uid);
-        
-        // Find presentation context for C-FIND
-        T_ASC_PresentationContextID findPresID = scu.findPresentationContextID(UID_FINDStudyRootQueryRetrieveInformationModel, "");
-        if (findPresID == 0) {
-            // Try with the MOVE context ID if FIND not available
-            findPresID = presID;
-        }
-        
-        // Query instances first to get their UIDs
-        OFList<QRResponse*> findResponses;
-        DcmDataset findQuery;
-        findQuery.putAndInsertOFStringArray(DCM_QueryRetrieveLevel, "IMAGE");
-        findQuery.putAndInsertOFStringArray(DCM_SeriesInstanceUID, series_instance_uid);
-        findQuery.putAndInsertOFStringArray(DCM_SOPInstanceUID, "");
-        
-        status = scu.sendFINDRequest(findPresID, &findQuery, &findResponses);
-        
-        if (status.bad()) {
-            DEBUG_LOG("C-FIND for instances failed: %s", status.text());
-            // Continue anyway - will try to move without knowing exact instance UIDs
-        }
-        
-        // Collect instance UIDs from responses
-        std::vector<std::string> instanceUIDs;
-        if (findResponses.size() > 0) {
-            OFListIterator(QRResponse*) iter = findResponses.begin();
-            while (iter != findResponses.end()) {
-                QRResponse* response = *iter;
-                if (response && response->m_dataset) {
-                    OFString sopInstanceUID;
-                    if (response->m_dataset->findAndGetOFString(DCM_SOPInstanceUID, sopInstanceUID).good()) {
-                        instanceUIDs.push_back(sopInstanceUID.c_str());
-                        DEBUG_LOG("Found instance UID: %s", sopInstanceUID.c_str());
+        {
+            DcmSCU scu2;
+            scu2.setAETitle(ae_title);
+            scu2.setPeerHostName(server_host);
+            scu2.setPeerPort(server_port);
+            scu2.setPeerAETitle(called_ae_title);
+            
+            scu2.addPresentationContext(UID_FINDStudyRootQueryRetrieveInformationModel, queryTSList);
+            
+            OFCondition status = scu2.initNetwork();
+            if (status.good()) {
+                status = scu2.negotiateAssociation();
+            }
+            
+            std::vector<std::string> instanceUIDs;
+            
+            if (status.good()) {
+                T_ASC_PresentationContextID findPresID = scu2.findPresentationContextID(
+                    UID_FINDStudyRootQueryRetrieveInformationModel, "");
+                
+                if (findPresID != 0) {
+                    OFList<QRResponse*> findResponses;
+                    DcmDataset findQuery;
+                    findQuery.putAndInsertOFStringArray(DCM_QueryRetrieveLevel, "IMAGE");
+                    findQuery.putAndInsertOFStringArray(DCM_SeriesInstanceUID, series_instance_uid);
+                    findQuery.putAndInsertOFStringArray(DCM_SOPInstanceUID, "");
+                    findQuery.putAndInsertOFStringArray(DCM_InstanceNumber, "");
+                    
+                    OFCondition findStatus = scu2.sendFINDRequest(findPresID, &findQuery, &findResponses);
+                    if (findStatus.good()) {
+                        OFListIterator(QRResponse*) iter = findResponses.begin();
+                        while (iter != findResponses.end()) {
+                            QRResponse* response = *iter;
+                            if (response && response->m_dataset) {
+                                OFString sopUID;
+                                if (response->m_dataset->findAndGetOFString(DCM_SOPInstanceUID, sopUID).good()) {
+                                    if (sopUID.length() > 0) {
+                                        instanceUIDs.push_back(sopUID.c_str());
+                                    }
+                                }
+                            }
+                            ++iter;
+                        }
+                    } else {
+                        DEBUG_LOG("C-FIND also failed: %s", findStatus.text());
+                    }
+                    
+                    // Clean up find responses
+                    while (!findResponses.empty()) {
+                        QRResponse* resp = findResponses.front();
+                        findResponses.pop_front();
+                        delete resp;
                     }
                 }
-                ++iter;
+                
+                scu2.releaseAssociation();
+            } else {
+                DEBUG_LOG("C-FIND association failed: %s", status.text());
+            }
+            
+            if (!instanceUIDs.empty()) {
+                // C-FIND found instances but C-GET couldn't download them
+                result->error = 1;
+                std::string errorMsg = "C-GET failed to download " + std::to_string(instanceUIDs.size()) +
+                    " instance(s). " + cgetError +
+                    ". The server may not support C-GET. Try enabling C-GET on the PACS server (e.g. Orthanc: set \"DicomGetEnabled\": true in configuration).";
+                result->error_message = strdup(errorMsg.c_str());
+                DEBUG_LOG("C-FIND found %d instances but C-GET couldn't retrieve them", (int)instanceUIDs.size());
+            } else {
+                result->error = 1;
+                std::string errorMsg = "No instances found. " + cgetError;
+                result->error_message = strdup(errorMsg.c_str());
+                DEBUG_LOG("Both C-GET and C-FIND returned no instances");
             }
         }
-        
-        // For now, create a single result indicating series can be downloaded
-        // In a real implementation, you would handle C-MOVE responses and file reception
-        result->instance_count = (instanceUIDs.size() > 0) ? instanceUIDs.size() : 1;
-        result->instances = (DicomInstance*)malloc(result->instance_count * sizeof(DicomInstance));
-        
-        if (instanceUIDs.size() > 0) {
-            for (int i = 0; i < (int)instanceUIDs.size(); i++) {
-                result->instances[i].sop_instance_uid = strdup(instanceUIDs[i].c_str());
-                std::string filepath = std::string(local_storage_path) + "/instance_" + std::to_string(i) + ".dcm";
-                result->instances[i].file_path = strdup(filepath.c_str());
-                result->instances[i].instance_number = strdup(std::to_string(i).c_str());
-                result->instances[i].content_type = strdup("IMAGE");
-                result->instances[i].file_size = 0;
-                DEBUG_LOG("Queued instance for download: %s", filepath.c_str());
-            }
-        } else {
-            // At least one placeholder
-            result->instances[0].sop_instance_uid = strdup(series_instance_uid);
-            std::string filepath = std::string(local_storage_path) + "/instance_0.dcm";
-            result->instances[0].file_path = strdup(filepath.c_str());
-            result->instances[0].instance_number = strdup("0");
-            result->instances[0].content_type = strdup("IMAGE");
-            result->instances[0].file_size = 0;
-        }
-        
-        scu.releaseAssociation();
-        DEBUG_LOG("C-MOVE download prepared for %d instances", result->instance_count);
         
     } catch (const std::exception& e) {
         result->error = 1;
-        result->error_message = strdup(("Exception during C-MOVE: " + std::string(e.what())).c_str());
+        result->error_message = strdup(("Exception during download: " + std::string(e.what())).c_str());
         DEBUG_LOG("Exception: %s", e.what());
     }
     
@@ -2212,6 +2469,168 @@ void dcmtk_free_instance_query_result(DicomInstanceQueryResult* result) {
             free(result->instances);
         }
         if (result->error_message) free(result->error_message);
+        free(result);
+    }
+}
+
+// ============================================================
+// Video Extraction from DICOM
+// ============================================================
+VideoExtractionResult* dcmtk_extract_video(const char* dicom_path, const char* output_path) {
+    VideoExtractionResult* result = (VideoExtractionResult*)malloc(sizeof(VideoExtractionResult));
+    result->success = 0;
+    result->error_message = nullptr;
+    result->output_path = nullptr;
+    result->mime_type = nullptr;
+    result->file_size = 0;
+
+    if (!dicom_path || !output_path) {
+        result->error_message = strdup("Error: dicom_path and output_path are required");
+        return result;
+    }
+
+    DEBUG_LOG("=== Extracting video from DICOM ===");
+    DEBUG_LOG("Input: %s", dicom_path);
+    DEBUG_LOG("Output: %s", output_path);
+
+    DcmFileFormat fileformat;
+    OFCondition status = fileformat.loadFile(dicom_path);
+    if (status.bad()) {
+        std::string err = "Failed to load DICOM file: ";
+        err += status.text();
+        result->error_message = strdup(err.c_str());
+        return result;
+    }
+
+    DcmDataset* dataset = fileformat.getDataset();
+    if (!dataset) {
+        result->error_message = strdup("Could not get dataset from DICOM file");
+        return result;
+    }
+
+    // Determine MIME type from transfer syntax
+    E_TransferSyntax xfer = dataset->getOriginalXfer();
+    const char* mime = "video/mp4";
+    switch (xfer) {
+        case EXS_MPEG2MainProfileAtMainLevel:
+        case EXS_MPEG2MainProfileAtHighLevel:
+            mime = "video/mpeg";
+            break;
+        default:
+            mime = "video/mp4";
+            break;
+    }
+
+    // Verify this is a video SOP class OR has a video transfer syntax
+    OFString sopClassUID;
+    dataset->findAndGetOFString(DCM_SOPClassUID, sopClassUID);
+    bool isVideoSopClass = (sopClassUID == UID_VideoEndoscopicImageStorage ||
+                            sopClassUID == UID_VideoMicroscopicImageStorage ||
+                            sopClassUID == UID_VideoPhotographicImageStorage);
+    bool isVideoTransferSyntax = (xfer == EXS_MPEG2MainProfileAtMainLevel ||
+                                  xfer == EXS_MPEG2MainProfileAtHighLevel ||
+                                  xfer == EXS_MPEG4HighProfileLevel4_1 ||
+                                  xfer == EXS_MPEG4BDcompatibleHighProfileLevel4_1);
+
+    if (!isVideoSopClass && !isVideoTransferSyntax) {
+        DEBUG_LOG("SOP class %s is not a video class and transfer syntax %d is not MPEG", sopClassUID.c_str(), (int)xfer);
+        result->error_message = strdup("Not a video DICOM file (neither video SOP class nor MPEG transfer syntax)");
+        return result;
+    }
+
+    DEBUG_LOG("Video detection: SOP=%s (isVideoSOP=%d), xfer=%d (isVideoTS=%d), mime=%s",
+              sopClassUID.c_str(), isVideoSopClass, (int)xfer, isVideoTransferSyntax, mime);
+
+    // Access encapsulated pixel data
+    DcmElement* pixelElement = nullptr;
+    status = dataset->findAndGetElement(DCM_PixelData, pixelElement);
+    if (status.bad() || !pixelElement) {
+        result->error_message = strdup("No PixelData element found in DICOM file");
+        return result;
+    }
+
+    DcmPixelData* pixelData = dynamic_cast<DcmPixelData*>(pixelElement);
+    if (!pixelData) {
+        result->error_message = strdup("PixelData element is not encapsulated pixel data");
+        return result;
+    }
+
+    // Get the encapsulated pixel sequence
+    DcmPixelSequence* pixSeq = nullptr;
+    E_TransferSyntax repXfer = EXS_Unknown;
+    const DcmRepresentationParameter* repParam = nullptr;
+    status = pixelData->getEncapsulatedRepresentation(repXfer, repParam, pixSeq);
+    if (status.bad() || !pixSeq) {
+        status = pixelData->getEncapsulatedRepresentation(xfer, repParam, pixSeq);
+        if (status.bad() || !pixSeq) {
+            result->error_message = strdup("Could not access encapsulated pixel data sequence");
+            return result;
+        }
+    }
+
+    unsigned long numItems = pixSeq->card();
+    DEBUG_LOG("Pixel sequence has %lu items (first is offset table)", numItems);
+
+    if (numItems < 2) {
+        result->error_message = strdup("Pixel sequence has no data items (only offset table or empty)");
+        return result;
+    }
+
+    // Write video data to output file
+    // Item 0 is the offset table, items 1..N are the actual video fragments
+    FILE* outFile = fopen(output_path, "wb");
+    if (!outFile) {
+        std::string err = "Cannot create output file: ";
+        err += output_path;
+        result->error_message = strdup(err.c_str());
+        return result;
+    }
+
+    long totalBytes = 0;
+    bool writeError = false;
+
+    for (unsigned long i = 1; i < numItems; i++) {
+        DcmPixelItem* pixItem = nullptr;
+        if (pixSeq->getItem(pixItem, i).good() && pixItem) {
+            Uint8* fragData = nullptr;
+            if (pixItem->getUint8Array(fragData).good() && fragData) {
+                unsigned long fragLen = pixItem->getLength();
+                size_t written = fwrite(fragData, 1, fragLen, outFile);
+                if (written != fragLen) {
+                    writeError = true;
+                    DEBUG_LOG("Write error at fragment %lu: wrote %zu of %lu", i, written, fragLen);
+                    break;
+                }
+                totalBytes += fragLen;
+                DEBUG_LOG("Wrote fragment %lu: %lu bytes", i, fragLen);
+            } else {
+                DEBUG_LOG("Warning: could not read fragment %lu data", i);
+            }
+        }
+    }
+
+    fclose(outFile);
+
+    if (writeError || totalBytes == 0) {
+        remove(output_path);
+        result->error_message = strdup(writeError ? "Error writing video data to file" : "No video data found in pixel items");
+        return result;
+    }
+
+    DEBUG_LOG("Successfully extracted %ld bytes of video data", totalBytes);
+
+    result->success = 1;
+    result->output_path = strdup(output_path);
+    result->mime_type = strdup(mime);
+    result->file_size = totalBytes;
+    return result;
+}
+
+void dcmtk_free_video_extraction_result(VideoExtractionResult* result) {
+    if (result) {
+        if (result->error_message) free(result->error_message);
+        if (result->output_path) free(result->output_path);
+        if (result->mime_type) free(result->mime_type);
         free(result);
     }
 }

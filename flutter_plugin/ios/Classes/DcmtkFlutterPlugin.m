@@ -126,6 +126,17 @@ extern "C" {
     int dcmtk_validate_dicom_file(const char* file_path);
     int dcmtk_test_server_connection_tls(const char* server_host, int server_port, const char* ae_title, const char* called_ae_title,
                                           const char* cert_file, const char* key_file, const char* ca_file);
+
+    typedef struct {
+        int success;
+        char* error_message;
+        char* output_path;
+        char* mime_type;
+        long file_size;
+    } VideoExtractionResult;
+
+    VideoExtractionResult* dcmtk_extract_video(const char* dicom_path, const char* output_path);
+    void dcmtk_free_video_extraction_result(VideoExtractionResult* result);
 #ifdef __cplusplus
 }
 #endif
@@ -690,6 +701,38 @@ extern "C" {
     } else {
       result(@(tlsResult == 1));
     }
+    
+  } else if ([@"extractVideo" isEqualToString:call.method]) {
+    NSString* dicomPath = call.arguments[@"dicomPath"];
+    NSString* outputPath = call.arguments[@"outputPath"];
+    
+    if (dicomPath == nil || outputPath == nil) {
+      result([FlutterError errorWithCode:@"INVALID_ARGUMENT"
+                                 message:@"dicomPath and outputPath are required"
+                                 details:nil]);
+      return;
+    }
+    
+    VideoExtractionResult* vidResult = dcmtk_extract_video([dicomPath UTF8String], [outputPath UTF8String]);
+    
+    if (!vidResult->success) {
+      NSString* errorMsg = vidResult->error_message ?
+          [NSString stringWithUTF8String:vidResult->error_message] : @"Unknown error";
+      dcmtk_free_video_extraction_result(vidResult);
+      result([FlutterError errorWithCode:@"VIDEO_EXTRACTION_ERROR"
+                                 message:errorMsg
+                                 details:nil]);
+      return;
+    }
+    
+    NSDictionary* videoResult = @{
+      @"outputPath": [NSString stringWithUTF8String:vidResult->output_path],
+      @"mimeType": [NSString stringWithUTF8String:vidResult->mime_type],
+      @"fileSize": @(vidResult->file_size),
+    };
+    
+    dcmtk_free_video_extraction_result(vidResult);
+    result(videoResult);
     
   } else {
     result(FlutterMethodNotImplemented);

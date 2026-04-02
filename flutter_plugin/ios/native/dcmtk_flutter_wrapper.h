@@ -148,6 +148,18 @@ MediaUploadResult* dcmtk_upload_video(const char* server_host, int server_port, 
 // Media retrieval functions
 DicomInstanceQueryResult* dcmtk_download_instances(const char* server_host, int server_port, const char* ae_title, const char* called_ae_title, const char* series_instance_uid, const char* local_storage_path);
 
+// Video extraction - extracts encapsulated video payload from DICOM to a file
+typedef struct {
+    int success;
+    char* error_message;
+    char* output_path;      // Path to extracted video file
+    char* mime_type;         // e.g. "video/mp4", "video/mpeg"
+    long file_size;
+} VideoExtractionResult;
+
+VideoExtractionResult* dcmtk_extract_video(const char* dicom_path, const char* output_path);
+void dcmtk_free_video_extraction_result(VideoExtractionResult* result);
+
 // Memory cleanup functions
 void dcmtk_free_query_result(DicomQueryResult* result);
 void dcmtk_free_study_query_result(DicomStudyQueryResult* result);
