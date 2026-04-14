@@ -18,7 +18,7 @@ extern "C" {
         char* error_message;
     } DicomImageData;
     
-    DicomImageData* dcmtk_extract_image(const char* filename, int frame_index);
+    DicomImageData* dcmtk_extract_image(const char* filename, int frame_index, double window_center, double window_width);
     void dcmtk_free_image_data(DicomImageData* img_data);
     
     // DICOM Server Communication Functions
@@ -28,6 +28,7 @@ extern "C" {
         char* patient_birth_date;
         char* patient_sex;
         int study_count;
+        char* number_of_patient_related_studies;
     } DicomPatient;
     
     typedef struct {
@@ -44,6 +45,10 @@ extern "C" {
       char* study_description;
       char* accession_number;
       int series_count;
+      char* modalities_in_study;
+      char* number_of_study_related_series;
+      char* number_of_study_related_instances;
+      char* referring_physician_name;
     } DicomStudy;
 
     typedef struct {
@@ -61,6 +66,8 @@ extern "C" {
         char* series_date;
         char* series_time;
         int instance_count;
+        char* number_of_series_related_instances;
+        char* body_part_examined;
     } DicomSeries;
     
     typedef struct {
@@ -112,7 +119,8 @@ extern "C" {
     DicomStudyQueryResult* dcmtk_query_studies_for_patient(const char* server_host, int server_port, const char* ae_title, const char* called_ae_title, const char* patient_id);
     DicomSeriesQueryResult* dcmtk_query_series_for_study(const char* server_host, int server_port, const char* ae_title, const char* called_ae_title, const char* study_instance_uid);
     PatientCreationResult* dcmtk_create_patient(const char* server_host, int server_port, const char* ae_title, const char* called_ae_title, PatientInfo* patient_info);
-    MediaUploadResult* dcmtk_upload_image(const char* server_host, int server_port, const char* ae_title, const char* called_ae_title, const char* patient_id, const char* image_path, const char* study_description, const char* series_description, const char* image_comments, const char* modality);
+    MediaUploadResult* dcmtk_upload_image(const char* server_host, int server_port, const char* ae_title, const char* called_ae_title, const char* patient_id, const char* image_path, const char* study_description, const char* series_description, const char* image_comments, const char* modality, const char* study_instance_uid, const char* series_instance_uid, int instance_number);
+    MediaUploadResult* dcmtk_upload_multiframe(const char* server_host, int server_port, const char* ae_title, const char* called_ae_title, const char* patient_id, const char** image_paths, int image_count, const char* study_description, const char* series_description, const char* image_comments, const char* modality, const char* study_instance_uid, const char* series_instance_uid);
     MediaUploadResult* dcmtk_upload_video(const char* server_host, int server_port, const char* ae_title, const char* called_ae_title, const char* patient_id, const char* video_path, const char* study_description, const char* series_description, const char* image_comments, const char* modality);
     void dcmtk_free_query_result(DicomQueryResult* result);
     void dcmtk_free_study_query_result(DicomStudyQueryResult* result);
@@ -137,6 +145,47 @@ extern "C" {
 
     VideoExtractionResult* dcmtk_extract_video(const char* dicom_path, const char* output_path);
     void dcmtk_free_video_extraction_result(VideoExtractionResult* result);
+
+    // C-STORE SCU: Send existing DICOM files
+    typedef struct {
+        int success_count;
+        int fail_count;
+        int total_count;
+        int error;
+        char* error_message;
+    } StoreResult;
+
+    StoreResult* dcmtk_store_files(const char* server_host, int server_port,
+                                    const char* ae_title, const char* called_ae_title,
+                                    const char** file_paths, int file_count);
+    void dcmtk_free_store_result(StoreResult* result);
+
+    // C-STORE SCP: Receive DICOM files
+    typedef struct {
+        int running;
+        int port;
+        int received_count;
+        char* storage_dir;
+        char* error_message;
+    } StoreSCPStatus;
+
+    int dcmtk_start_store_scp(int port, const char* ae_title, const char* storage_dir);
+    void dcmtk_stop_store_scp(void);
+    StoreSCPStatus* dcmtk_get_store_scp_status(void);
+    void dcmtk_free_store_scp_status(StoreSCPStatus* status);
+
+    // C-MOVE
+    DicomInstanceQueryResult* dcmtk_move_instances(const char* server_host, int server_port,
+                                                    const char* ae_title, const char* called_ae_title,
+                                                    const char* series_instance_uid,
+                                                    const char* local_storage_path,
+                                                    int move_scp_port);
+
+    // TLS Configuration
+    void dcmtk_set_tls_config(const char* cert_file, const char* key_file, const char* ca_file);
+    void dcmtk_clear_tls_config(void);
+    int dcmtk_is_tls_available(void);
+    int dcmtk_is_tls_enabled(void);
 #ifdef __cplusplus
 }
 #endif
@@ -170,6 +219,8 @@ extern "C" {
   } else if ([@"extractImage" isEqualToString:call.method]) {
     NSString* filePath = call.arguments[@"filePath"];
     NSNumber* frameIndex = call.arguments[@"frameIndex"];
+    NSNumber* windowCenter = call.arguments[@"windowCenter"];
+    NSNumber* windowWidth = call.arguments[@"windowWidth"];
     
     if (filePath == nil || filePath.length == 0) {
       result([FlutterError errorWithCode:@"INVALID_ARGUMENT"
@@ -179,8 +230,10 @@ extern "C" {
     }
     
     int frame = frameIndex ? [frameIndex intValue] : 0;
+    double wc = windowCenter ? [windowCenter doubleValue] : 0.0;
+    double ww = windowWidth ? [windowWidth doubleValue] : 0.0;
     const char* cFilePath = [filePath UTF8String];
-    DicomImageData* imgData = dcmtk_extract_image(cFilePath, frame);
+    DicomImageData* imgData = dcmtk_extract_image(cFilePath, frame, wc, ww);
     
     if (imgData->error) {
       NSString* errorMsg = imgData->error_message ? 
@@ -268,7 +321,8 @@ extern "C" {
         @"patientName": patient->patient_name ? [NSString stringWithUTF8String:patient->patient_name] : @"",
         @"patientBirthDate": patient->patient_birth_date ? [NSString stringWithUTF8String:patient->patient_birth_date] : @"",
         @"patientSex": patient->patient_sex ? [NSString stringWithUTF8String:patient->patient_sex] : @"",
-        @"studyCount": @(patient->study_count)
+        @"studyCount": @(patient->study_count),
+        @"numberOfPatientRelatedStudies": patient->number_of_patient_related_studies ? [NSString stringWithUTF8String:patient->number_of_patient_related_studies] : @""
       };
       [patientsArray addObject:patientDict];
     }
@@ -317,7 +371,11 @@ extern "C" {
         @"studyTime": study->study_time ? [NSString stringWithUTF8String:study->study_time] : @"",
         @"studyDescription": study->study_description ? [NSString stringWithUTF8String:study->study_description] : @"",
         @"accessionNumber": study->accession_number ? [NSString stringWithUTF8String:study->accession_number] : @"",
-        @"seriesCount": @(study->series_count)
+        @"seriesCount": @(study->series_count),
+        @"modalitiesInStudy": study->modalities_in_study ? [NSString stringWithUTF8String:study->modalities_in_study] : @"",
+        @"numberOfStudyRelatedSeries": study->number_of_study_related_series ? [NSString stringWithUTF8String:study->number_of_study_related_series] : @"",
+        @"numberOfStudyRelatedInstances": study->number_of_study_related_instances ? [NSString stringWithUTF8String:study->number_of_study_related_instances] : @"",
+        @"referringPhysicianName": study->referring_physician_name ? [NSString stringWithUTF8String:study->referring_physician_name] : @""
       };
       [studiesArray addObject:studyDict];
     }
@@ -367,7 +425,9 @@ extern "C" {
         @"modality": series->modality ? [NSString stringWithUTF8String:series->modality] : @"",
         @"seriesDate": series->series_date ? [NSString stringWithUTF8String:series->series_date] : @"",
         @"seriesTime": series->series_time ? [NSString stringWithUTF8String:series->series_time] : @"",
-        @"instanceCount": @(series->instance_count)
+        @"instanceCount": @(series->instance_count),
+        @"numberOfSeriesRelatedInstances": series->number_of_series_related_instances ? [NSString stringWithUTF8String:series->number_of_series_related_instances] : @"",
+        @"bodyPartExamined": series->body_part_examined ? [NSString stringWithUTF8String:series->body_part_examined] : @""
       };
       [seriesArray addObject:seriesDict];
     }
@@ -503,11 +563,14 @@ extern "C" {
     NSString* seriesDescription = call.arguments[@"seriesDescription"];
     NSString* imageComments = call.arguments[@"imageComments"];
     NSString* modality = call.arguments[@"modality"];
+    NSString* studyInstanceUID = call.arguments[@"studyInstanceUID"];
+    NSString* seriesInstanceUID = call.arguments[@"seriesInstanceUID"];
+    NSNumber* instanceNumber = call.arguments[@"instanceNumber"];
     
-    printf("[iOS] Parameters - Host: %s, Port: %d, Patient: %s, Image: %s, Study: %s\\n", 
+    printf("[iOS] Parameters - Host: %s, Port: %d, Patient: %s, Image: %s, Instance#: %d\\n", 
            [serverHost UTF8String], [serverPort intValue], 
            [patientId UTF8String], [imagePath UTF8String],
-           studyDescription ? [studyDescription UTF8String] : "NULL");
+           instanceNumber ? [instanceNumber intValue] : 1);
     fflush(stdout);
     
     if (serverHost == nil || serverPort == nil || aeTitle == nil || calledAeTitle == nil || patientId == nil || imagePath == nil) {
@@ -519,44 +582,142 @@ extern "C" {
       return;
     }
     
-    const char* cServerHost = [serverHost UTF8String];
-    int cServerPort = [serverPort intValue];
-    const char* cAeTitle = [aeTitle UTF8String];
-    const char* cCalledAeTitle = [calledAeTitle UTF8String];
-    const char* cPatientId = [patientId UTF8String];
-    const char* cImagePath = [imagePath UTF8String];
-    const char* cStudyDescription = studyDescription ? [studyDescription UTF8String] : "Uploaded Image";
-    const char* cSeriesDescription = seriesDescription ? [seriesDescription UTF8String] : "Uploaded Series";
-    const char* cImageComments = imageComments ? [imageComments UTF8String] : "";
-    const char* cModality = modality ? [modality UTF8String] : "SC";
+    // Copy all params for background dispatch
+    NSString* sHost = [serverHost copy];
+    NSNumber* sPort = [serverPort copy];
+    NSString* sAe = [aeTitle copy];
+    NSString* sCalled = [calledAeTitle copy];
+    NSString* sPid = [patientId copy];
+    NSString* sPath = [imagePath copy];
+    NSString* sStudyDesc = studyDescription ? [studyDescription copy] : nil;
+    NSString* sSeriesDesc = seriesDescription ? [seriesDescription copy] : nil;
+    NSString* sComments = imageComments ? [imageComments copy] : nil;
+    NSString* sModality = modality ? [modality copy] : nil;
+    NSString* sStudyUID = studyInstanceUID ? [studyInstanceUID copy] : nil;
+    NSString* sSeriesUID = seriesInstanceUID ? [seriesInstanceUID copy] : nil;
+    int instNum = instanceNumber ? [instanceNumber intValue] : 1;
     
-    printf("[iOS] Calling dcmtk_upload_image native function\\n");
-    fflush(stdout);
-    MediaUploadResult* uploadResult = dcmtk_upload_image(cServerHost, cServerPort, cAeTitle, cCalledAeTitle, cPatientId, cImagePath, cStudyDescription, cSeriesDescription, cImageComments, cModality);
+    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+      const char* cServerHost = [sHost UTF8String];
+      int cServerPort = [sPort intValue];
+      const char* cAeTitle = [sAe UTF8String];
+      const char* cCalledAeTitle = [sCalled UTF8String];
+      const char* cPatientId = [sPid UTF8String];
+      const char* cImagePath = [sPath UTF8String];
+      const char* cStudyDescription = sStudyDesc ? [sStudyDesc UTF8String] : "Uploaded Image";
+      const char* cSeriesDescription = sSeriesDesc ? [sSeriesDesc UTF8String] : "Uploaded Series";
+      const char* cImageComments = sComments ? [sComments UTF8String] : "";
+      const char* cModality = sModality ? [sModality UTF8String] : "SC";
+      const char* cStudyInstanceUID = sStudyUID ? [sStudyUID UTF8String] : "";
+      const char* cSeriesInstanceUID = sSeriesUID ? [sSeriesUID UTF8String] : "";
     
-    printf("[iOS] dcmtk_upload_image returned, success: %d\\n", uploadResult->success);
-    fflush(stdout);
-    if (!uploadResult->success) {
-      NSString* errorMsg = uploadResult->error_message ? 
-          [NSString stringWithUTF8String:uploadResult->error_message] : @"Unknown upload error";
-      printf("[iOS] Upload failed with error: %s\\n", [errorMsg UTF8String]);
+      printf("[iOS] Calling dcmtk_upload_image native function on background thread\\n");
       fflush(stdout);
-      dcmtk_free_media_upload_result(uploadResult);
-      result([FlutterError errorWithCode:@"UPLOAD_ERROR"
-                                 message:errorMsg
+      MediaUploadResult* uploadResult = dcmtk_upload_image(cServerHost, cServerPort, cAeTitle, cCalledAeTitle, cPatientId, cImagePath, cStudyDescription, cSeriesDescription, cImageComments, cModality, cStudyInstanceUID, cSeriesInstanceUID, instNum);
+    
+      printf("[iOS] dcmtk_upload_image returned, success: %d\\n", uploadResult->success);
+      fflush(stdout);
+      
+      dispatch_async(dispatch_get_main_queue(), ^{
+        if (!uploadResult->success) {
+          NSString* errorMsg = uploadResult->error_message ? 
+              [NSString stringWithUTF8String:uploadResult->error_message] : @"Unknown upload error";
+          printf("[iOS] Upload failed with error: %s\\n", [errorMsg UTF8String]);
+          fflush(stdout);
+          dcmtk_free_media_upload_result(uploadResult);
+          result([FlutterError errorWithCode:@"UPLOAD_ERROR"
+                                     message:errorMsg
+                                     details:nil]);
+          return;
+        }
+    
+        NSDictionary* resultDict = @{
+          @"success": @(uploadResult->success),
+          @"studyInstanceUID": uploadResult->study_instance_uid ? [NSString stringWithUTF8String:uploadResult->study_instance_uid] : @"",
+          @"seriesInstanceUID": uploadResult->series_instance_uid ? [NSString stringWithUTF8String:uploadResult->series_instance_uid] : @"",
+          @"sopInstanceUID": uploadResult->sop_instance_uid ? [NSString stringWithUTF8String:uploadResult->sop_instance_uid] : @""
+        };
+    
+        dcmtk_free_media_upload_result(uploadResult);
+        result(resultDict);
+      });
+    });
+
+  } else if ([@"uploadMultiframe" isEqualToString:call.method]) {
+    printf("[iOS] uploadMultiframe method called\\n");
+    fflush(stdout);
+    NSString* serverHost = call.arguments[@"serverHost"];
+    NSNumber* serverPort = call.arguments[@"serverPort"];
+    NSString* aeTitle = call.arguments[@"aeTitle"];
+    NSString* calledAeTitle = call.arguments[@"calledAeTitle"];
+    NSString* patientId = call.arguments[@"patientId"];
+    NSArray<NSString*>* imagePaths = call.arguments[@"imagePaths"];
+    NSString* studyDescription = call.arguments[@"studyDescription"];
+    NSString* seriesDescription = call.arguments[@"seriesDescription"];
+    NSString* imageComments = call.arguments[@"imageComments"];
+    NSString* modality = call.arguments[@"modality"];
+    NSString* studyInstanceUID = call.arguments[@"studyInstanceUID"];
+    NSString* seriesInstanceUID = call.arguments[@"seriesInstanceUID"];
+    
+    if (serverHost == nil || serverPort == nil || aeTitle == nil || calledAeTitle == nil || patientId == nil || imagePaths == nil || imagePaths.count == 0) {
+      result([FlutterError errorWithCode:@"INVALID_ARGUMENT"
+                                 message:@"Required parameters missing for multi-frame upload"
                                  details:nil]);
       return;
     }
     
-    NSDictionary* resultDict = @{
-      @"success": @(uploadResult->success),
-      @"studyInstanceUID": uploadResult->study_instance_uid ? [NSString stringWithUTF8String:uploadResult->study_instance_uid] : @"",
-      @"seriesInstanceUID": uploadResult->series_instance_uid ? [NSString stringWithUTF8String:uploadResult->series_instance_uid] : @"",
-      @"sopInstanceUID": uploadResult->sop_instance_uid ? [NSString stringWithUTF8String:uploadResult->sop_instance_uid] : @""
-    };
+    // Copy params for background dispatch
+    NSString* sHost = [serverHost copy];
+    NSNumber* sPort = [serverPort copy];
+    NSString* sAe = [aeTitle copy];
+    NSString* sCalled = [calledAeTitle copy];
+    NSString* sPid = [patientId copy];
+    NSArray<NSString*>* sPaths = [imagePaths copy];
+    NSString* sStudyDesc = studyDescription ? [studyDescription copy] : nil;
+    NSString* sSeriesDesc = seriesDescription ? [seriesDescription copy] : nil;
+    NSString* sComments = imageComments ? [imageComments copy] : nil;
+    NSString* sModality = modality ? [modality copy] : nil;
+    NSString* sStudyUID = studyInstanceUID ? [studyInstanceUID copy] : nil;
+    NSString* sSeriesUID = seriesInstanceUID ? [seriesInstanceUID copy] : nil;
     
-    dcmtk_free_media_upload_result(uploadResult);
-    result(resultDict);
+    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+      int imageCount = (int)sPaths.count;
+      const char** cPaths = (const char**)malloc(imageCount * sizeof(const char*));
+      for (int i = 0; i < imageCount; i++) {
+        cPaths[i] = [sPaths[i] UTF8String];
+      }
+      
+      MediaUploadResult* uploadResult = dcmtk_upload_multiframe(
+        [sHost UTF8String], [sPort intValue], [sAe UTF8String], [sCalled UTF8String],
+        [sPid UTF8String], cPaths, imageCount,
+        sStudyDesc ? [sStudyDesc UTF8String] : "Uploaded Study",
+        sSeriesDesc ? [sSeriesDesc UTF8String] : "Multi-frame Series",
+        sComments ? [sComments UTF8String] : "",
+        sModality ? [sModality UTF8String] : "SC",
+        sStudyUID ? [sStudyUID UTF8String] : "",
+        sSeriesUID ? [sSeriesUID UTF8String] : "");
+      
+      free(cPaths);
+      
+      dispatch_async(dispatch_get_main_queue(), ^{
+        if (!uploadResult->success) {
+          NSString* errorMsg = uploadResult->error_message ?
+              [NSString stringWithUTF8String:uploadResult->error_message] : @"Unknown error";
+          dcmtk_free_media_upload_result(uploadResult);
+          result([FlutterError errorWithCode:@"UPLOAD_ERROR" message:errorMsg details:nil]);
+          return;
+        }
+        
+        NSDictionary* resultDict = @{
+          @"success": @(uploadResult->success),
+          @"studyInstanceUID": uploadResult->study_instance_uid ? [NSString stringWithUTF8String:uploadResult->study_instance_uid] : @"",
+          @"seriesInstanceUID": uploadResult->series_instance_uid ? [NSString stringWithUTF8String:uploadResult->series_instance_uid] : @"",
+          @"sopInstanceUID": uploadResult->sop_instance_uid ? [NSString stringWithUTF8String:uploadResult->sop_instance_uid] : @""
+        };
+        dcmtk_free_media_upload_result(uploadResult);
+        result(resultDict);
+      });
+    });
     
   } else if ([@"uploadVideo" isEqualToString:call.method]) {
     NSString* serverHost = call.arguments[@"serverHost"];
@@ -734,6 +895,157 @@ extern "C" {
     dcmtk_free_video_extraction_result(vidResult);
     result(videoResult);
     
+  } else if ([@"storeFiles" isEqualToString:call.method]) {
+    // C-STORE SCU: Send existing DICOM files to a remote PACS
+    NSString *serverHost = call.arguments[@"serverHost"];
+    NSNumber *serverPort = call.arguments[@"serverPort"];
+    NSString *aeTitle = call.arguments[@"aeTitle"];
+    NSString *calledAeTitle = call.arguments[@"calledAeTitle"];
+    NSArray *filePaths = call.arguments[@"filePaths"];
+
+    // Copy params for background thread
+    NSString *hostCopy = [serverHost copy];
+    int portVal = [serverPort intValue];
+    NSString *aeCopy = [aeTitle copy];
+    NSString *calledCopy = [calledAeTitle copy];
+    NSArray *pathsCopy = [filePaths copy];
+
+    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+        int count = (int)[pathsCopy count];
+        const char** cPaths = (const char**)malloc(sizeof(const char*) * count);
+        for (int i = 0; i < count; i++) {
+            cPaths[i] = [pathsCopy[i] UTF8String];
+        }
+
+        StoreResult* storeRes = dcmtk_store_files(
+            [hostCopy UTF8String], portVal,
+            [aeCopy UTF8String], [calledCopy UTF8String],
+            cPaths, count);
+        free(cPaths);
+
+        NSDictionary *response = @{
+            @"successCount": @(storeRes->success_count),
+            @"failCount": @(storeRes->fail_count),
+            @"totalCount": @(storeRes->total_count),
+            @"error": @(storeRes->error),
+            @"errorMessage": storeRes->error_message ? [NSString stringWithUTF8String:storeRes->error_message] : @"",
+        };
+        dcmtk_free_store_result(storeRes);
+
+        dispatch_async(dispatch_get_main_queue(), ^{
+            result(response);
+        });
+    });
+
+  } else if ([@"startStoreSCP" isEqualToString:call.method]) {
+    // Start C-STORE SCP listener
+    NSNumber *port = call.arguments[@"port"];
+    NSString *aeTitle = call.arguments[@"aeTitle"];
+    NSString *storageDir = call.arguments[@"storageDir"];
+
+    int portVal = [port intValue];
+    NSString *aeCopy = [aeTitle copy];
+    NSString *dirCopy = [storageDir copy];
+
+    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+        int res = dcmtk_start_store_scp(portVal, [aeCopy UTF8String], [dirCopy UTF8String]);
+        // This blocks until SCP stops, so we don't call result here
+        // The SCP runs until stopped
+        NSLog(@"[DcmtkPlugin] SCP exited with code: %d", res);
+    });
+
+    // Return immediately — SCP is running in background
+    result(@{@"started": @YES, @"port": port});
+
+  } else if ([@"stopStoreSCP" isEqualToString:call.method]) {
+    dcmtk_stop_store_scp();
+    result(@{@"stopped": @YES});
+
+  } else if ([@"getStoreSCPStatus" isEqualToString:call.method]) {
+    StoreSCPStatus* status = dcmtk_get_store_scp_status();
+    NSDictionary *response = @{
+        @"running": @(status->running),
+        @"port": @(status->port),
+        @"receivedCount": @(status->received_count),
+        @"storageDir": status->storage_dir ? [NSString stringWithUTF8String:status->storage_dir] : @"",
+        @"errorMessage": status->error_message ? [NSString stringWithUTF8String:status->error_message] : @"",
+    };
+    dcmtk_free_store_scp_status(status);
+    result(response);
+
+  } else if ([@"moveInstances" isEqualToString:call.method]) {
+    // C-MOVE retrieval
+    NSString *serverHost = call.arguments[@"serverHost"];
+    NSNumber *serverPort = call.arguments[@"serverPort"];
+    NSString *aeTitle = call.arguments[@"aeTitle"];
+    NSString *calledAeTitle = call.arguments[@"calledAeTitle"];
+    NSString *seriesInstanceUID = call.arguments[@"seriesInstanceUID"];
+    NSString *localStoragePath = call.arguments[@"localStoragePath"];
+    NSNumber *moveSCPPort = call.arguments[@"moveSCPPort"];
+
+    NSString *hostCopy = [serverHost copy];
+    int portVal = [serverPort intValue];
+    NSString *aeCopy = [aeTitle copy];
+    NSString *calledCopy = [calledAeTitle copy];
+    NSString *seriesCopy = [seriesInstanceUID copy];
+    NSString *storageCopy = [localStoragePath copy];
+    int scpPort = [moveSCPPort intValue];
+
+    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+        DicomInstanceQueryResult* moveRes = dcmtk_move_instances(
+            [hostCopy UTF8String], portVal,
+            [aeCopy UTF8String], [calledCopy UTF8String],
+            [seriesCopy UTF8String], [storageCopy UTF8String],
+            scpPort);
+
+        NSMutableArray *instances = [NSMutableArray array];
+        if (moveRes->instances) {
+            for (int i = 0; i < moveRes->instance_count; i++) {
+                NSMutableDictionary *inst = [NSMutableDictionary dictionary];
+                if (moveRes->instances[i].file_path) {
+                    inst[@"filePath"] = [NSString stringWithUTF8String:moveRes->instances[i].file_path];
+                }
+                inst[@"fileSize"] = @(moveRes->instances[i].file_size);
+                [instances addObject:inst];
+            }
+        }
+
+        NSDictionary *response = @{
+            @"instances": instances,
+            @"instanceCount": @(moveRes->instance_count),
+            @"error": @(moveRes->error),
+            @"errorMessage": moveRes->error_message ? [NSString stringWithUTF8String:moveRes->error_message] : @"",
+        };
+        dcmtk_free_instance_query_result(moveRes);
+
+        dispatch_async(dispatch_get_main_queue(), ^{
+            result(response);
+        });
+    });
+
+  } else if ([@"setTlsConfig" isEqualToString:call.method]) {
+    NSString* certFile = call.arguments[@"certFile"];
+    NSString* keyFile = call.arguments[@"keyFile"];
+    NSString* caFile = call.arguments[@"caFile"];
+    dcmtk_set_tls_config(
+        certFile ? [certFile UTF8String] : NULL,
+        keyFile  ? [keyFile UTF8String]  : NULL,
+        caFile   ? [caFile UTF8String]   : NULL
+    );
+    result(@YES);
+
+  } else if ([@"clearTlsConfig" isEqualToString:call.method]) {
+    dcmtk_clear_tls_config();
+    result(@YES);
+
+  } else if ([@"isTlsAvailable" isEqualToString:call.method]) {
+    int available = dcmtk_is_tls_available();
+    result(@(available == 1));
+
+  } else if ([@"isTlsEnabled" isEqualToString:call.method]) {
+    int enabled = dcmtk_is_tls_enabled();
+    result(@(enabled == 1));
+
   } else {
     result(FlutterMethodNotImplemented);
   }

@@ -16,8 +16,9 @@
 #include <dcmtk/dcmdata/libi2d/i2dbmps.h>
 #include <dcmtk/dcmdata/libi2d/i2dplsc.h>
 #ifdef WITH_OPENSSL
-#include <dcmtk/dcmtls/tlsscu.h>
+#include <dcmtk/dcmtls/tlslayer.h>
 #endif
+#include <dcmtk/dcmnet/scp.h>
 #include <string>
 #include <sstream>
 #include <vector>
@@ -34,6 +35,94 @@
     printf("\n"); \
     fflush(stdout); \
 } while(0)
+
+// ============================================================================
+// Global TLS Configuration
+// ============================================================================
+static struct {
+    std::string certFile;
+    std::string keyFile;
+    std::string caFile;
+    bool enabled;
+} g_tlsConfig = {"", "", "", false};
+
+#ifdef WITH_OPENSSL
+// Helper: apply TLS transport layer to a DcmSCU after initNetwork()
+// Returns true on success, false on failure
+static bool apply_tls_to_scu(DcmSCU& scu) {
+    if (!g_tlsConfig.enabled) return true; // no TLS configured, plaintext OK
+
+    DcmTLSTransportLayer *tLayer = new DcmTLSTransportLayer(NET_REQUESTOR, NULL, OFTrue);
+    if (!tLayer) {
+        DEBUG_LOG("Failed to create TLS transport layer");
+        return false;
+    }
+
+    // Set security profile
+    tLayer->setTLSProfile(TSP_Profile_BCP_195_RFC_8996);
+
+    // Load certificate and private key
+    if (!g_tlsConfig.certFile.empty()) {
+        OFCondition cond = tLayer->setPrivateKeyFile(g_tlsConfig.keyFile.c_str(), DCF_Filetype_PEM);
+        if (cond.bad()) {
+            DEBUG_LOG("TLS: Failed to load private key: %s", cond.text());
+            delete tLayer;
+            return false;
+        }
+        cond = tLayer->setCertificateFile(g_tlsConfig.certFile.c_str(), DCF_Filetype_PEM, TSP_Profile_BCP_195_RFC_8996);
+        if (cond.bad()) {
+            DEBUG_LOG("TLS: Failed to load certificate: %s", cond.text());
+            delete tLayer;
+            return false;
+        }
+        if (!tLayer->checkPrivateKeyMatchesCertificate()) {
+            DEBUG_LOG("TLS: Private key does not match certificate");
+            delete tLayer;
+            return false;
+        }
+    }
+
+    // Load trusted CA certificate
+    if (!g_tlsConfig.caFile.empty()) {
+        OFCondition cond = tLayer->addTrustedCertificateFile(g_tlsConfig.caFile.c_str(), DCF_Filetype_PEM);
+        if (cond.bad()) {
+            DEBUG_LOG("TLS: Failed to load CA certificate: %s", cond.text());
+            delete tLayer;
+            return false;
+        }
+        tLayer->setCertificateVerification(DCV_checkCertificate);
+    } else {
+        // No CA cert — skip verification (self-signed / testing)
+        tLayer->setCertificateVerification(DCV_ignoreCertificate);
+    }
+
+    // Activate cipher suites
+    tLayer->activateCipherSuites();
+
+    // Apply to SCU — DcmSCU takes ownership of the transport layer
+    OFCondition result = scu.useSecureConnection(tLayer);
+    if (result.bad()) {
+        DEBUG_LOG("TLS: Failed to enable secure connection: %s", result.text());
+        return false;
+    }
+
+    DEBUG_LOG("TLS: Secure connection configured successfully");
+    return true;
+}
+#endif // WITH_OPENSSL
+
+// Check if TLS should be used and apply it. Returns false only if TLS was
+// requested but failed to configure. When OpenSSL is not compiled in and
+// TLS is enabled, it logs a warning and returns true (falls back to plaintext).
+static bool maybe_apply_tls(DcmSCU& scu) {
+    if (!g_tlsConfig.enabled) return true;
+#ifdef WITH_OPENSSL
+    return apply_tls_to_scu(scu);
+#else
+    DEBUG_LOG("TLS: OpenSSL not compiled in, falling back to plaintext");
+    return true;
+#endif
+}
 
 extern "C" {
 
@@ -149,9 +238,9 @@ char* dcmtk_load_dicom_file(const char* filename) {
     return strdup(oss.str().c_str());
 }
 
-DicomImageData* dcmtk_extract_image(const char* filename, int frame_index) {
+DicomImageData* dcmtk_extract_image(const char* filename, int frame_index, double window_center, double window_width) {
     DEBUG_LOG("=== Starting image extraction ===");
-    DEBUG_LOG("File: %s, Frame: %d", filename, frame_index);
+    DEBUG_LOG("File: %s, Frame: %d, WC: %.1f, WW: %.1f", filename, frame_index, window_center, window_width);
     
     DicomImageData* result = (DicomImageData*)malloc(sizeof(DicomImageData));
     result->data = nullptr;
@@ -303,17 +392,27 @@ DicomImageData* dcmtk_extract_image(const char* filename, int frame_index) {
                 error += std::to_string((int)imgStatus);
                 break;
         }
+
+        // Always include transfer syntax UID in error for diagnostics
+        OFString transferSyntaxUID;
+        if (fileformat.getMetaInfo() && fileformat.getMetaInfo()->findAndGetOFString(DCM_TransferSyntaxUID, transferSyntaxUID).good()) {
+            error += " [TSUID=";
+            error += transferSyntaxUID.c_str();
+            error += "]";
+
+            // Provide user-friendly hints for known unsupported transfer syntaxes
+            std::string tsStr(transferSyntaxUID.c_str());
+            if (tsStr == "1.2.840.10008.1.2.4.90" || tsStr == "1.2.840.10008.1.2.4.91") {
+                error += "\n\nThis image uses JPEG 2000 compression which is not currently supported. "
+                         "Try decompressing the file on the PACS server first, or use a viewer that supports JPEG 2000.";
+            } else if (tsStr == "1.2.840.10008.1.2.4.201" || tsStr == "1.2.840.10008.1.2.4.202" || tsStr == "1.2.840.10008.1.2.4.203") {
+                error += "\n\nThis image uses HTJ2K (High-Throughput JPEG 2000) compression which is not currently supported.";
+            }
+        }
         
         // For multi-frame images with missing attribute error, try direct pixel data access
         if (imgStatus == EIS_MissingAttribute && isMultiFrame) {
             DEBUG_LOG("Multi-frame image with missing attribute - trying direct pixel data access");
-
-            OFString transferSyntaxUID;
-            if (fileformat.getMetaInfo() && fileformat.getMetaInfo()->findAndGetOFString(DCM_TransferSyntaxUID, transferSyntaxUID).good()) {
-                error += " [TSUID=";
-                error += transferSyntaxUID.c_str();
-                error += "]";
-            }
             
             // Get basic image parameters
             Uint16 rows, cols, bitsAlloc = 8, samplesPerPixel = 1;
@@ -463,6 +562,15 @@ DicomImageData* dcmtk_extract_image(const char* filename, int frame_index) {
     
     // Determine color vs grayscale
     int isColorImage = image->isMonochrome() ? 0 : 1;
+    
+    // Apply custom window/level if specified (window_width > 0 means custom W/L)
+    if (window_width > 0 && !isColorImage) {
+        if (image->setWindow(window_center, window_width)) {
+            DEBUG_LOG("Applied custom W/L: center=%.1f width=%.1f", window_center, window_width);
+        } else {
+            DEBUG_LOG("WARNING: setWindow(%.1f, %.1f) failed, using default", window_center, window_width);
+        }
+    }
     
     DEBUG_LOG("Image dimensions - Width: %d, Height: %d, Color: %d, Frames: %d",
               result->width, result->height, isColorImage, result->total_frames);
@@ -698,6 +806,7 @@ int dcmtk_test_server_connection(const char* server_host, int server_port, const
             DEBUG_LOG("Failed to initialize network: %s", result.text());
             return 0;
         }
+        if (!maybe_apply_tls(scu)) return 0;
         
         result = scu.negotiateAssociation();
         if (result.bad()) {
@@ -772,6 +881,11 @@ DicomQueryResult* dcmtk_query_patients(const char* server_host, int server_port,
             DEBUG_LOG("Network init failed: %s", status.text());
             return result;
         }
+        if (!maybe_apply_tls(scu)) {
+            result->error = 1;
+            result->error_message = strdup("TLS configuration failed");
+            return result;
+        }
         
         DEBUG_LOG("Negotiating association...");
         status = scu.negotiateAssociation();
@@ -818,6 +932,7 @@ DicomQueryResult* dcmtk_query_patients(const char* server_host, int server_port,
         query.putAndInsertOFStringArray(DCM_PatientName, "");         // Return PatientName  
         query.putAndInsertOFStringArray(DCM_PatientBirthDate, "");    // Return Birth Date
         query.putAndInsertOFStringArray(DCM_PatientSex, "");          // Return Sex
+        query.putAndInsertOFStringArray(DCM_NumberOfPatientRelatedStudies, ""); // Return study count
         
         DEBUG_LOG("Patient-level query dataset created (QueryRetrieveLevel=PATIENT + patient fields)");
         DEBUG_LOG("About to send C-FIND request...");
@@ -909,15 +1024,16 @@ DicomQueryResult* dcmtk_query_patients(const char* server_host, int server_port,
                     DEBUG_LOG("Processing patient response %d", result->patient_count + 1);
                     
                     // Extract patient information from patient record (direct query)
-                    OFString patientID, patientName, birthDate, sex;
+                    OFString patientID, patientName, birthDate, sex, numStudies;
                     
                     response->m_dataset->findAndGetOFString(DCM_PatientID, patientID);
                     response->m_dataset->findAndGetOFString(DCM_PatientName, patientName);
                     response->m_dataset->findAndGetOFString(DCM_PatientBirthDate, birthDate);
                     response->m_dataset->findAndGetOFString(DCM_PatientSex, sex);
+                    response->m_dataset->findAndGetOFString(DCM_NumberOfPatientRelatedStudies, numStudies);
                     
-                    DEBUG_LOG("Patient: ID='%s', Name='%s', BirthDate='%s', Sex='%s'", 
-                             patientID.c_str(), patientName.c_str(), birthDate.c_str(), sex.c_str());
+                    DEBUG_LOG("Patient: ID='%s', Name='%s', BirthDate='%s', Sex='%s', Studies='%s'", 
+                             patientID.c_str(), patientName.c_str(), birthDate.c_str(), sex.c_str(), numStudies.c_str());
                     
                     // Since this is a patient-level query, each response is a unique patient
                     if (!patientID.empty()) {
@@ -927,7 +1043,8 @@ DicomQueryResult* dcmtk_query_patients(const char* server_host, int server_port,
                         patient->patient_name = strdup(patientName.c_str());
                         patient->patient_birth_date = strdup(birthDate.c_str());
                         patient->patient_sex = strdup(sex.c_str());
-                        patient->study_count = 0; // Will be set when querying studies
+                        patient->study_count = 0;
+                        patient->number_of_patient_related_studies = strdup(numStudies.c_str());
                         
                         result->patient_count++;
                         DEBUG_LOG("Added new patient: %s", patientID.c_str());
@@ -981,6 +1098,11 @@ DicomStudyQueryResult* dcmtk_query_studies_for_patient(const char* server_host, 
             result->error_message = strdup(("Network initialization failed: " + std::string(status.text())).c_str());
             return result;
         }
+        if (!maybe_apply_tls(scu)) {
+            result->error = 1;
+            result->error_message = strdup("TLS configuration failed");
+            return result;
+        }
         
         status = scu.negotiateAssociation();
         if (status.bad()) {
@@ -1007,6 +1129,10 @@ DicomStudyQueryResult* dcmtk_query_studies_for_patient(const char* server_host, 
         query.putAndInsertOFStringArray(DCM_StudyTime, "");
         query.putAndInsertOFStringArray(DCM_StudyDescription, "");
         query.putAndInsertOFStringArray(DCM_AccessionNumber, "");
+        query.putAndInsertOFStringArray(DCM_ModalitiesInStudy, "");
+        query.putAndInsertOFStringArray(DCM_NumberOfStudyRelatedSeries, "");
+        query.putAndInsertOFStringArray(DCM_NumberOfStudyRelatedInstances, "");
+        query.putAndInsertOFStringArray(DCM_ReferringPhysicianName, "");
         
         // Send C-FIND request with the proper presentation context ID
         OFList<QRResponse*> responses;
@@ -1030,12 +1156,17 @@ DicomStudyQueryResult* dcmtk_query_studies_for_patient(const char* server_host, 
                 QRResponse* response = *iter;
                 if (response && response->m_dataset) {
                     OFString studyUID, studyDate, studyTime, studyDescription, accessionNumber;
+                    OFString modalitiesInStudy, numSeries, numInstances, referringPhysician;
 
                     response->m_dataset->findAndGetOFString(DCM_StudyInstanceUID, studyUID);
                     response->m_dataset->findAndGetOFString(DCM_StudyDate, studyDate);
                     response->m_dataset->findAndGetOFString(DCM_StudyTime, studyTime);
                     response->m_dataset->findAndGetOFString(DCM_StudyDescription, studyDescription);
                     response->m_dataset->findAndGetOFString(DCM_AccessionNumber, accessionNumber);
+                    response->m_dataset->findAndGetOFString(DCM_ModalitiesInStudy, modalitiesInStudy);
+                    response->m_dataset->findAndGetOFString(DCM_NumberOfStudyRelatedSeries, numSeries);
+                    response->m_dataset->findAndGetOFString(DCM_NumberOfStudyRelatedInstances, numInstances);
+                    response->m_dataset->findAndGetOFString(DCM_ReferringPhysicianName, referringPhysician);
 
                     if (!studyUID.empty()) {
                         DicomStudy* study = &result->studies[result->study_count];
@@ -1045,6 +1176,10 @@ DicomStudyQueryResult* dcmtk_query_studies_for_patient(const char* server_host, 
                         study->study_description = strdup(studyDescription.c_str());
                         study->accession_number = strdup(accessionNumber.c_str());
                         study->series_count = 0;
+                        study->modalities_in_study = strdup(modalitiesInStudy.c_str());
+                        study->number_of_study_related_series = strdup(numSeries.c_str());
+                        study->number_of_study_related_instances = strdup(numInstances.c_str());
+                        study->referring_physician_name = strdup(referringPhysician.c_str());
                         result->study_count++;
                     }
                 }
@@ -1072,6 +1207,10 @@ void dcmtk_free_study_query_result(DicomStudyQueryResult* result) {
                 if (result->studies[i].study_time) free(result->studies[i].study_time);
                 if (result->studies[i].study_description) free(result->studies[i].study_description);
                 if (result->studies[i].accession_number) free(result->studies[i].accession_number);
+                if (result->studies[i].modalities_in_study) free(result->studies[i].modalities_in_study);
+                if (result->studies[i].number_of_study_related_series) free(result->studies[i].number_of_study_related_series);
+                if (result->studies[i].number_of_study_related_instances) free(result->studies[i].number_of_study_related_instances);
+                if (result->studies[i].referring_physician_name) free(result->studies[i].referring_physician_name);
             }
             free(result->studies);
         }
@@ -1088,6 +1227,7 @@ void dcmtk_free_query_result(DicomQueryResult* result) {
                 if (result->patients[i].patient_name) free(result->patients[i].patient_name);
                 if (result->patients[i].patient_birth_date) free(result->patients[i].patient_birth_date);
                 if (result->patients[i].patient_sex) free(result->patients[i].patient_sex);
+                if (result->patients[i].number_of_patient_related_studies) free(result->patients[i].number_of_patient_related_studies);
             }
             free(result->patients);
         }
@@ -1208,6 +1348,10 @@ PatientCreationResult* dcmtk_create_patient(const char* server_host, int server_
             DEBUG_LOG("Network init failed for patient creation: %s", status.text());
             return result;
         }
+        if (!maybe_apply_tls(scu)) {
+            result->error_message = strdup("TLS configuration failed");
+            return result;
+        }
         
         DEBUG_LOG("Step 5: Negotiating association");
         status = scu.negotiateAssociation();
@@ -1259,7 +1403,7 @@ void dcmtk_free_patient_creation_result(PatientCreationResult* result) {
     }
 }
 
-MediaUploadResult* dcmtk_upload_image(const char* server_host, int server_port, const char* ae_title, const char* called_ae_title, const char* patient_id, const char* image_path, const char* study_description, const char* series_description, const char* image_comments, const char* modality) {
+MediaUploadResult* dcmtk_upload_image(const char* server_host, int server_port, const char* ae_title, const char* called_ae_title, const char* patient_id, const char* image_path, const char* study_description, const char* series_description, const char* image_comments, const char* modality, const char* study_instance_uid, const char* series_instance_uid, int instance_number) {
     DEBUG_LOG("Uploading image: %s for patient %s to server %s:%d", 
              image_path ? image_path : "NULL", 
              patient_id ? patient_id : "NULL", 
@@ -1295,8 +1439,18 @@ MediaUploadResult* dcmtk_upload_image(const char* server_host, int server_port, 
         bool isDicomFile = loadStatus.good();
         
         char studyUID[100], seriesUID[100], sopUID[100];
-        dcmGenerateUniqueIdentifier(studyUID, SITE_STUDY_UID_ROOT);
-        dcmGenerateUniqueIdentifier(seriesUID, SITE_SERIES_UID_ROOT);
+        if (study_instance_uid && strlen(study_instance_uid) > 0) {
+            strncpy(studyUID, study_instance_uid, 99);
+            studyUID[99] = '\0';
+        } else {
+            dcmGenerateUniqueIdentifier(studyUID, SITE_STUDY_UID_ROOT);
+        }
+        if (series_instance_uid && strlen(series_instance_uid) > 0) {
+            strncpy(seriesUID, series_instance_uid, 99);
+            seriesUID[99] = '\0';
+        } else {
+            dcmGenerateUniqueIdentifier(seriesUID, SITE_SERIES_UID_ROOT);
+        }
         dcmGenerateUniqueIdentifier(sopUID, SITE_INSTANCE_UID_ROOT);
         
         DcmFileFormat fileFormat;
@@ -1449,7 +1603,9 @@ MediaUploadResult* dcmtk_upload_image(const char* server_host, int server_port, 
             
             dataset->putAndInsertOFStringArray(DCM_SOPInstanceUID, sopUID);
             dataset->putAndInsertOFStringArray(DCM_SOPClassUID, sopClassUID);
-            dataset->putAndInsertOFStringArray(DCM_InstanceNumber, "1");
+            char instNumStr[16];
+            snprintf(instNumStr, sizeof(instNumStr), "%d", instance_number > 0 ? instance_number : 1);
+            dataset->putAndInsertOFStringArray(DCM_InstanceNumber, instNumStr);
         }
         
         // Add comments
@@ -1488,6 +1644,10 @@ MediaUploadResult* dcmtk_upload_image(const char* server_host, int server_port, 
         OFCondition status = scu.initNetwork();
         if (status.bad()) {
             result->error_message = strdup(("Network initialization failed: " + std::string(status.text())).c_str());
+            return result;
+        }
+        if (!maybe_apply_tls(scu)) {
+            result->error_message = strdup("TLS configuration failed");
             return result;
         }
         
@@ -1573,6 +1733,307 @@ void dcmtk_free_media_upload_result(MediaUploadResult* result) {
     }
 }
 
+// Upload multiple images as a single multi-frame DICOM instance
+MediaUploadResult* dcmtk_upload_multiframe(const char* server_host, int server_port,
+    const char* ae_title, const char* called_ae_title, const char* patient_id,
+    const char** image_paths, int image_count,
+    const char* study_description, const char* series_description,
+    const char* image_comments, const char* modality,
+    const char* study_instance_uid, const char* series_instance_uid) {
+
+    DEBUG_LOG("Uploading %d images as multi-frame for patient %s", image_count, patient_id ? patient_id : "NULL");
+
+    MediaUploadResult* result = (MediaUploadResult*)malloc(sizeof(MediaUploadResult));
+    result->success = 0;
+    result->error_message = nullptr;
+    result->study_instance_uid = nullptr;
+    result->series_instance_uid = nullptr;
+    result->sop_instance_uid = nullptr;
+
+    if (!server_host || !ae_title || !called_ae_title || !patient_id || !image_paths || image_count < 1) {
+        result->error_message = strdup("Invalid parameters for multi-frame upload");
+        return result;
+    }
+
+    try {
+        // Register decompression codecs
+        static bool mfCodecsRegistered = false;
+        if (!mfCodecsRegistered) {
+            DcmRLEDecoderRegistration::registerCodecs();
+            DJDecoderRegistration::registerCodecs();
+            DJLSDecoderRegistration::registerCodecs();
+            mfCodecsRegistered = true;
+        }
+
+        // Phase 1: Decode all images to get pixel data and determine common dimensions
+        struct FrameData {
+            std::vector<Uint8> pixels; // RGB pixels
+            int width;
+            int height;
+        };
+        std::vector<FrameData> frames;
+
+        for (int f = 0; f < image_count; f++) {
+            if (!image_paths[f] || strlen(image_paths[f]) == 0) {
+                result->error_message = strdup(("Empty path for image " + std::to_string(f + 1)).c_str());
+                return result;
+            }
+
+            struct stat fileStat;
+            if (stat(image_paths[f], &fileStat) != 0) {
+                result->error_message = strdup(("File not found: " + std::string(image_paths[f])).c_str());
+                return result;
+            }
+
+            // Use Image2Dcm to decode the JPEG into a DICOM dataset, then extract pixels
+            std::string path(image_paths[f]);
+            std::string ext;
+            size_t dotPos = path.rfind('.');
+            if (dotPos != std::string::npos) {
+                ext = path.substr(dotPos + 1);
+                for (auto& c : ext) c = tolower(c);
+            }
+
+            bool isJpeg = (ext == "jpg" || ext == "jpeg");
+            if (!isJpeg) {
+                result->error_message = strdup("Multi-frame upload requires JPEG images. Please convert images to JPEG first.");
+                return result;
+            }
+
+            I2DJpegSource* jpegSrc = new I2DJpegSource();
+            jpegSrc->setExtSeqSupport(OFTrue);
+            jpegSrc->setProgrSupport(OFTrue);
+            jpegSrc->setImageFile(image_paths[f]);
+
+            I2DOutputPlugSC* outPlug = new I2DOutputPlugSC();
+            Image2Dcm converter;
+            DcmDataset* convDset = nullptr;
+            E_TransferSyntax proposedTS;
+
+            OFCondition convStatus = converter.convertFirstFrame(jpegSrc, outPlug, 1, convDset, proposedTS);
+            if (convStatus.good()) {
+                convStatus = converter.updateLossyCompressionInfo(jpegSrc, 1, convDset);
+            }
+
+            delete jpegSrc;
+            delete outPlug;
+
+            if (convStatus.bad() || !convDset) {
+                result->error_message = strdup(("Failed to decode image " + std::to_string(f + 1) + ": " + convStatus.text()).c_str());
+                if (convDset) delete convDset;
+                return result;
+            }
+
+            // Decompress if needed so we get raw pixels
+            convDset->chooseRepresentation(EXS_LittleEndianExplicit, NULL);
+
+            // Render to get RGB pixel data
+            DicomImage dcmImg(convDset, convDset->getOriginalXfer());
+            if (dcmImg.getStatus() != EIS_Normal) {
+                result->error_message = strdup(("Cannot render image " + std::to_string(f + 1)).c_str());
+                delete convDset;
+                return result;
+            }
+
+            int w = (int)dcmImg.getWidth();
+            int h = (int)dcmImg.getHeight();
+
+            FrameData fd;
+            fd.width = w;
+            fd.height = h;
+
+            // Get 8-bit RGB pixels
+            const void* pixData = dcmImg.getOutputData(8, 0);
+            if (!pixData) {
+                result->error_message = strdup(("Cannot extract pixels from image " + std::to_string(f + 1)).c_str());
+                delete convDset;
+                return result;
+            }
+
+            int samplesPerPixel = (dcmImg.isMonochrome()) ? 1 : 3;
+            int pixelBytes = w * h * samplesPerPixel;
+            fd.pixels.resize(w * h * 3); // Always store as RGB
+
+            if (samplesPerPixel == 1) {
+                // Convert grayscale to RGB
+                const Uint8* src = (const Uint8*)pixData;
+                for (int p = 0; p < w * h; p++) {
+                    fd.pixels[p * 3] = src[p];
+                    fd.pixels[p * 3 + 1] = src[p];
+                    fd.pixels[p * 3 + 2] = src[p];
+                }
+            } else {
+                memcpy(fd.pixels.data(), pixData, pixelBytes);
+            }
+
+            frames.push_back(std::move(fd));
+            delete convDset;
+
+            DEBUG_LOG("Frame %d: %dx%d decoded", f + 1, w, h);
+        }
+
+        // Use dimensions from first frame
+        int targetW = frames[0].width;
+        int targetH = frames[0].height;
+
+        // Verify all frames have same dimensions (DICOM requires this)
+        for (int f = 1; f < (int)frames.size(); f++) {
+            if (frames[f].width != targetW || frames[f].height != targetH) {
+                DEBUG_LOG("Warning: Frame %d is %dx%d, expected %dx%d — will be stored with first frame dimensions",
+                    f + 1, frames[f].width, frames[f].height, targetW, targetH);
+                // For simplicity, we'll just use the raw data; DICOM requires same dims
+                // Real production code would resize here
+                if (frames[f].width != targetW || frames[f].height != targetH) {
+                    result->error_message = strdup(("Frame " + std::to_string(f + 1) + " has different dimensions (" +
+                        std::to_string(frames[f].width) + "x" + std::to_string(frames[f].height) + " vs " +
+                        std::to_string(targetW) + "x" + std::to_string(targetH) + "). All frames must have same size.").c_str());
+                    return result;
+                }
+            }
+        }
+
+        // Phase 2: Build a multi-frame DICOM dataset
+        char studyUID[100], seriesUID[100], sopUID[100];
+        if (study_instance_uid && strlen(study_instance_uid) > 0) {
+            strncpy(studyUID, study_instance_uid, 99); studyUID[99] = '\0';
+        } else {
+            dcmGenerateUniqueIdentifier(studyUID, SITE_STUDY_UID_ROOT);
+        }
+        if (series_instance_uid && strlen(series_instance_uid) > 0) {
+            strncpy(seriesUID, series_instance_uid, 99); seriesUID[99] = '\0';
+        } else {
+            dcmGenerateUniqueIdentifier(seriesUID, SITE_SERIES_UID_ROOT);
+        }
+        dcmGenerateUniqueIdentifier(sopUID, SITE_INSTANCE_UID_ROOT);
+
+        DcmFileFormat fileFormat;
+        DcmDataset* dataset = fileFormat.getDataset();
+
+        // Patient
+        dataset->putAndInsertOFStringArray(DCM_PatientID, patient_id);
+        dataset->putAndInsertOFStringArray(DCM_PatientName, patient_id);
+        dataset->putAndInsertOFStringArray(DCM_PatientBirthDate, "");
+        dataset->putAndInsertOFStringArray(DCM_PatientSex, "");
+
+        // Study
+        dataset->putAndInsertOFStringArray(DCM_StudyInstanceUID, studyUID);
+        OFString uploadDate, uploadTime;
+        DcmDate::getCurrentDate(uploadDate);
+        DcmTime::getCurrentTime(uploadTime);
+        dataset->putAndInsertOFStringArray(DCM_StudyDate, uploadDate.c_str());
+        dataset->putAndInsertOFStringArray(DCM_StudyTime, uploadTime.c_str());
+        dataset->putAndInsertOFStringArray(DCM_StudyDescription, study_description ? study_description : "Uploaded Study");
+        dataset->putAndInsertOFStringArray(DCM_AccessionNumber, "");
+
+        // Series
+        dataset->putAndInsertOFStringArray(DCM_SeriesInstanceUID, seriesUID);
+        dataset->putAndInsertOFStringArray(DCM_SeriesNumber, "1");
+        dataset->putAndInsertOFStringArray(DCM_SeriesDescription, series_description ? series_description : "Multi-frame Series");
+        dataset->putAndInsertOFStringArray(DCM_Modality, modality ? modality : "SC");
+
+        // Instance
+        const char* sopClassUID = UID_SecondaryCaptureImageStorage;
+        // Use Multi-frame SC if available
+        if (image_count > 1) {
+            sopClassUID = UID_MultiframeSingleBitSecondaryCaptureImageStorage;
+            // Actually use true color multi-frame SC
+            sopClassUID = UID_MultiframeTrueColorSecondaryCaptureImageStorage;
+        }
+        dataset->putAndInsertOFStringArray(DCM_SOPClassUID, sopClassUID);
+        dataset->putAndInsertOFStringArray(DCM_SOPInstanceUID, sopUID);
+        dataset->putAndInsertOFStringArray(DCM_InstanceNumber, "1");
+
+        // Image attributes
+        dataset->putAndInsertUint16(DCM_SamplesPerPixel, 3);
+        dataset->putAndInsertOFStringArray(DCM_PhotometricInterpretation, "RGB");
+        dataset->putAndInsertUint16(DCM_Rows, (Uint16)targetH);
+        dataset->putAndInsertUint16(DCM_Columns, (Uint16)targetW);
+        dataset->putAndInsertUint16(DCM_BitsAllocated, 8);
+        dataset->putAndInsertUint16(DCM_BitsStored, 8);
+        dataset->putAndInsertUint16(DCM_HighBit, 7);
+        dataset->putAndInsertUint16(DCM_PixelRepresentation, 0);
+        dataset->putAndInsertUint16(DCM_PlanarConfiguration, 0); // Color-by-pixel
+
+        // Multi-frame
+        char numFramesStr[16];
+        snprintf(numFramesStr, sizeof(numFramesStr), "%d", image_count);
+        dataset->putAndInsertOFStringArray(DCM_NumberOfFrames, numFramesStr);
+
+        // Comments
+        if (image_comments && strlen(image_comments) > 0) {
+            dataset->putAndInsertOFStringArray(DCM_ImageComments, image_comments);
+        }
+
+        // Concatenate all frame pixel data
+        int frameSize = targetW * targetH * 3; // RGB
+        std::vector<Uint8> allPixels(frameSize * image_count);
+        for (int f = 0; f < image_count; f++) {
+            memcpy(allPixels.data() + f * frameSize, frames[f].pixels.data(), frameSize);
+        }
+        dataset->putAndInsertUint8Array(DCM_PixelData, allPixels.data(), (unsigned long)(allPixels.size()));
+
+        DEBUG_LOG("Multi-frame DICOM: %dx%d, %d frames, %lu bytes pixel data",
+            targetW, targetH, image_count, (unsigned long)allPixels.size());
+
+        // Phase 3: C-STORE
+        E_TransferSyntax outputTS = EXS_LittleEndianExplicit;
+        DcmSCU scu;
+        scu.setAETitle(ae_title);
+        scu.setPeerAETitle(called_ae_title);
+        scu.setPeerHostName(server_host);
+        scu.setPeerPort(server_port);
+
+        OFList<OFString> transferSyntaxes;
+        transferSyntaxes.push_back(UID_LittleEndianExplicitTransferSyntax);
+        transferSyntaxes.push_back(UID_LittleEndianImplicitTransferSyntax);
+
+        scu.addPresentationContext(sopClassUID, transferSyntaxes);
+
+        OFCondition status = scu.initNetwork();
+        if (status.bad()) {
+            result->error_message = strdup(("Network init failed: " + std::string(status.text())).c_str());
+            return result;
+        }
+        if (!maybe_apply_tls(scu)) {
+            result->error_message = strdup("TLS configuration failed");
+            return result;
+        }
+
+        status = scu.negotiateAssociation();
+        if (status.bad()) {
+            result->error_message = strdup(("Association failed: " + std::string(status.text())).c_str());
+            return result;
+        }
+
+        T_ASC_PresentationContextID presID = scu.findPresentationContextID(sopClassUID, "");
+        if (presID == 0) {
+            result->error_message = strdup("No acceptable presentation context for multi-frame storage");
+            scu.releaseAssociation();
+            return result;
+        }
+
+        Uint16 rspStatusCode;
+        status = scu.sendSTORERequest(presID, "", dataset, rspStatusCode);
+
+        if (status.good()) {
+            result->success = 1;
+            result->study_instance_uid = strdup(studyUID);
+            result->series_instance_uid = strdup(seriesUID);
+            result->sop_instance_uid = strdup(sopUID);
+            DEBUG_LOG("Multi-frame uploaded: SOP UID = %s, %d frames", sopUID, image_count);
+        } else {
+            result->error_message = strdup(("C-STORE failed: " + std::string(status.text())).c_str());
+        }
+
+        scu.releaseAssociation();
+
+    } catch (const std::exception& e) {
+        result->error_message = strdup(("Exception: " + std::string(e.what())).c_str());
+    }
+
+    return result;
+}
+
 // Video upload - encapsulates video file as DICOM Secondary Capture or Video object
 MediaUploadResult* dcmtk_upload_video(const char* server_host, int server_port, const char* ae_title, const char* called_ae_title, const char* patient_id, const char* video_path, const char* study_description, const char* series_description, const char* image_comments, const char* modality) {
     DEBUG_LOG("Uploading video: %s for patient %s to server %s:%d",
@@ -1653,6 +2114,10 @@ MediaUploadResult* dcmtk_upload_video(const char* server_host, int server_port, 
             OFCondition status = scu.initNetwork();
             if (status.bad()) {
                 sendErr = std::string("Network initialization failed: ") + status.text();
+                return OFFalse;
+            }
+            if (!maybe_apply_tls(scu)) {
+                sendErr = "TLS configuration failed";
                 return OFFalse;
             }
 
@@ -1839,6 +2304,11 @@ DicomInstanceQueryResult* dcmtk_query_instances_for_series(const char* server_ho
             result->error_message = strdup(("Network initialization failed: " + std::string(status.text())).c_str());
             return result;
         }
+        if (!maybe_apply_tls(scu)) {
+            result->error = 1;
+            result->error_message = strdup("TLS configuration failed");
+            return result;
+        }
         
         status = scu.negotiateAssociation();
         if (status.bad()) {
@@ -1912,55 +2382,19 @@ DicomInstanceQueryResult* dcmtk_query_instances_for_series(const char* server_ho
     return result;
 }
 
-// TLS support - compile-time check for OpenSSL availability
+// TLS support - uses per-call TLS config (cert/key/ca) rather than global config
 int dcmtk_test_server_connection_tls(const char* server_host, int server_port, const char* ae_title, const char* called_ae_title,
                                       const char* cert_file, const char* key_file, const char* ca_file) {
 #ifdef WITH_OPENSSL
     DEBUG_LOG("Testing TLS connection to %s:%d", server_host, server_port);
     
-    try {
-        DcmTLSSCU scu;
-        scu.setAETitle(ae_title);
-        scu.setPeerAETitle(called_ae_title);
-        scu.setPeerHostName(server_host);
-        scu.setPeerPort(server_port);
-        
-        // Configure TLS
-        if (cert_file && strlen(cert_file) > 0)
-            scu.setTLSCertificate(cert_file, key_file);
-        if (ca_file && strlen(ca_file) > 0)
-            scu.addTrustedCertFile(ca_file);
-        
-        OFList<OFString> transferSyntaxes;
-        transferSyntaxes.push_back(UID_LittleEndianImplicitTransferSyntax);
-        scu.addPresentationContext(UID_VerificationSOPClass, transferSyntaxes);
-        
-        OFCondition result = scu.initNetwork();
-        if (result.bad()) {
-            DEBUG_LOG("TLS network init failed: %s", result.text());
-            return 0;
-        }
-        
-        result = scu.negotiateAssociation();
-        if (result.bad()) {
-            DEBUG_LOG("TLS association failed: %s", result.text());
-            return 0;
-        }
-        
-        T_ASC_PresentationContextID presID = scu.findPresentationContextID(UID_VerificationSOPClass, "");
-        if (presID == 0) {
-            scu.releaseAssociation();
-            return 0;
-        }
-        
-        result = scu.sendECHORequest(presID);
-        scu.releaseAssociation();
-        return result.good() ? 1 : 0;
-        
-    } catch (const std::exception& e) {
-        DEBUG_LOG("TLS connection exception: %s", e.what());
-        return 0;
-    }
+    // Temporarily set TLS config for this call
+    dcmtk_set_tls_config(cert_file, key_file, ca_file);
+    
+    int retval = dcmtk_test_server_connection(server_host, server_port, ae_title, called_ae_title);
+    
+    dcmtk_clear_tls_config();
+    return retval;
 #else
     DEBUG_LOG("TLS not available - OpenSSL not compiled in");
     return -1; // -1 indicates TLS not available
@@ -1997,6 +2431,11 @@ DicomSeriesQueryResult* dcmtk_query_series_for_study(const char* server_host, in
             result->error_message = strdup(("Network initialization failed: " + std::string(status.text())).c_str());
             return result;
         }
+        if (!maybe_apply_tls(scu)) {
+            result->error = 1;
+            result->error_message = strdup("TLS configuration failed");
+            return result;
+        }
         
         status = scu.negotiateAssociation();
         if (status.bad()) {
@@ -2023,6 +2462,8 @@ DicomSeriesQueryResult* dcmtk_query_series_for_study(const char* server_host, in
         query.putAndInsertOFStringArray(DCM_Modality, "");
         query.putAndInsertOFStringArray(DCM_SeriesDate, "");
         query.putAndInsertOFStringArray(DCM_SeriesTime, "");
+        query.putAndInsertOFStringArray(DCM_NumberOfSeriesRelatedInstances, "");
+        query.putAndInsertOFStringArray(DCM_BodyPartExamined, "");
         
         OFList<QRResponse*> responses;
         status = scu.sendFINDRequest(presID, &query, &responses);
@@ -2045,6 +2486,7 @@ DicomSeriesQueryResult* dcmtk_query_series_for_study(const char* server_host, in
                 QRResponse* response = *iter;
                 if (response && response->m_dataset) {
                     OFString seriesUID, seriesNumber, seriesDescription, modality, seriesDate, seriesTime;
+                    OFString numInstances, bodyPart;
                     
                     response->m_dataset->findAndGetOFString(DCM_SeriesInstanceUID, seriesUID);
                     response->m_dataset->findAndGetOFString(DCM_SeriesNumber, seriesNumber);
@@ -2052,6 +2494,8 @@ DicomSeriesQueryResult* dcmtk_query_series_for_study(const char* server_host, in
                     response->m_dataset->findAndGetOFString(DCM_Modality, modality);
                     response->m_dataset->findAndGetOFString(DCM_SeriesDate, seriesDate);
                     response->m_dataset->findAndGetOFString(DCM_SeriesTime, seriesTime);
+                    response->m_dataset->findAndGetOFString(DCM_NumberOfSeriesRelatedInstances, numInstances);
+                    response->m_dataset->findAndGetOFString(DCM_BodyPartExamined, bodyPart);
                     
                     if (!seriesUID.empty()) {
                         DicomSeries* series = &result->series[result->series_count];
@@ -2061,10 +2505,12 @@ DicomSeriesQueryResult* dcmtk_query_series_for_study(const char* server_host, in
                         series->modality = strdup(modality.c_str());
                         series->series_date = strdup(seriesDate.c_str());
                         series->series_time = strdup(seriesTime.c_str());
-                        series->instance_count = 0; // Will be set when querying instances
+                        series->instance_count = 0;
+                        series->number_of_series_related_instances = strdup(numInstances.c_str());
+                        series->body_part_examined = strdup(bodyPart.c_str());
                         
                         result->series_count++;
-                        DEBUG_LOG("Added series: %s (%s)", seriesUID.c_str(), modality.c_str());
+                        DEBUG_LOG("Added series: %s (%s) [%s images, %s]", seriesUID.c_str(), modality.c_str(), numInstances.c_str(), bodyPart.c_str());
                     }
                 }
                 ++iter;
@@ -2091,6 +2537,8 @@ void dcmtk_free_series_query_result(DicomSeriesQueryResult* result) {
                 if (result->series[i].modality) free(result->series[i].modality);
                 if (result->series[i].series_date) free(result->series[i].series_date);
                 if (result->series[i].series_time) free(result->series[i].series_time);
+                if (result->series[i].number_of_series_related_instances) free(result->series[i].number_of_series_related_instances);
+                if (result->series[i].body_part_examined) free(result->series[i].body_part_examined);
             }
             free(result->series);
         }
@@ -2100,41 +2548,76 @@ void dcmtk_free_series_query_result(DicomSeriesQueryResult* result) {
 }
 
 // Helper: storage SOP classes split by type for proper transfer syntax negotiation.
-// Image SOP classes use image transfer syntaxes (JPEG, RLE, etc.)
+// Image SOP classes use image transfer syntaxes (JPEG, J2K, RLE, etc.)
 static const char* g_imageStorageSopClasses[] = {
+    // CT
     UID_CTImageStorage,
     UID_EnhancedCTImageStorage,
+    UID_LegacyConvertedEnhancedCTImageStorage,
+    // MR
     UID_MRImageStorage,
     UID_EnhancedMRImageStorage,
     UID_EnhancedMRColorImageStorage,
+    UID_LegacyConvertedEnhancedMRImageStorage,
+    UID_MRSpectroscopyStorage,
+    // Ultrasound
     UID_UltrasoundImageStorage,
+    UID_UltrasoundMultiframeImageStorage,
+    UID_EnhancedUSVolumeStorage,
+    // Secondary Capture
     UID_SecondaryCaptureImageStorage,
     UID_MultiframeSingleBitSecondaryCaptureImageStorage,
     UID_MultiframeGrayscaleByteSecondaryCaptureImageStorage,
     UID_MultiframeGrayscaleWordSecondaryCaptureImageStorage,
     UID_MultiframeTrueColorSecondaryCaptureImageStorage,
+    // X-Ray / CR / DX / Mammography
     UID_ComputedRadiographyImageStorage,
     UID_DigitalXRayImageStorageForPresentation,
     UID_DigitalXRayImageStorageForProcessing,
     UID_DigitalMammographyXRayImageStorageForPresentation,
     UID_DigitalMammographyXRayImageStorageForProcessing,
+    UID_DigitalIntraOralXRayImageStorageForPresentation,
+    UID_DigitalIntraOralXRayImageStorageForProcessing,
+    UID_BreastTomosynthesisImageStorage,
+    UID_BreastProjectionXRayImageStorageForPresentation,
+    UID_BreastProjectionXRayImageStorageForProcessing,
+    // Angiography / Fluoroscopy
     UID_XRayAngiographicImageStorage,
+    UID_EnhancedXAImageStorage,
     UID_XRayRadiofluoroscopicImageStorage,
+    UID_EnhancedXRFImageStorage,
+    UID_XRay3DAngiographicImageStorage,
+    UID_XRay3DCraniofacialImageStorage,
+    // Nuclear Medicine / PET
     UID_NuclearMedicineImageStorage,
+    UID_PositronEmissionTomographyImageStorage,
+    UID_EnhancedPETImageStorage,
+    UID_LegacyConvertedEnhancedPETImageStorage,
+    // VL / Ophthalmic
+    UID_VLEndoscopicImageStorage,
+    UID_VLMicroscopicImageStorage,
+    UID_VLSlideCoordinatesMicroscopicImageStorage,
     UID_VLPhotographicImageStorage,
+    UID_VLWholeSlideMicroscopyImageStorage,
+    UID_DermoscopicPhotographyImageStorage,
     UID_OphthalmicPhotography8BitImageStorage,
     UID_OphthalmicPhotography16BitImageStorage,
     UID_OphthalmicTomographyImageStorage,
-    UID_BreastTomosynthesisImageStorage,
-    UID_BasicTextSRStorage,
-    UID_EnhancedSRStorage,
-    UID_ComprehensiveSRStorage,
-    UID_EncapsulatedPDFStorage,
-    UID_PositronEmissionTomographyImageStorage,
+    // IVOCT
+    UID_IntravascularOpticalCoherenceTomographyImageStorageForPresentation,
+    UID_IntravascularOpticalCoherenceTomographyImageStorageForProcessing,
+    // RT
     UID_RTImageStorage,
     UID_RTDoseStorage,
     UID_RTStructureSetStorage,
     UID_RTPlanStorage,
+    // Segmentation / Parametric / Registration
+    UID_SegmentationStorage,
+    UID_ParametricMapStorage,
+    UID_SpatialRegistrationStorage,
+    UID_DeformableSpatialRegistrationStorage,
+    UID_TractographyResultsStorage,
+    UID_RawDataStorage,
 };
 static const int g_numImageStorageSopClasses = sizeof(g_imageStorageSopClasses) / sizeof(g_imageStorageSopClasses[0]);
 
@@ -2145,6 +2628,37 @@ static const char* g_videoStorageSopClasses[] = {
     UID_VideoPhotographicImageStorage,
 };
 static const int g_numVideoStorageSopClasses = sizeof(g_videoStorageSopClasses) / sizeof(g_videoStorageSopClasses[0]);
+
+// Non-image storage SOP classes (presentation states, KOS, structured reports, encapsulated docs)
+// These are commonly found alongside images in a series and use uncompressed transfer syntaxes.
+static const char* g_otherStorageSopClasses[] = {
+    // Presentation States
+    UID_GrayscaleSoftcopyPresentationStateStorage,
+    UID_ColorSoftcopyPresentationStateStorage,
+    UID_PseudoColorSoftcopyPresentationStateStorage,
+    UID_BlendingSoftcopyPresentationStateStorage,
+    UID_XAXRFGrayscaleSoftcopyPresentationStateStorage,
+    // Key Object Selection
+    UID_KeyObjectSelectionDocumentStorage,
+    // Structured Reports
+    UID_BasicTextSRStorage,
+    UID_EnhancedSRStorage,
+    UID_ComprehensiveSRStorage,
+    UID_Comprehensive3DSRStorage,
+    // Encapsulated Documents
+    UID_EncapsulatedPDFStorage,
+    UID_EncapsulatedCDAStorage,
+    UID_EncapsulatedSTLStorage,
+    // Waveforms
+    UID_TwelveLeadECGWaveformStorage,
+    UID_GeneralECGWaveformStorage,
+    UID_BasicVoiceAudioWaveformStorage,
+    // Surface / Fiducials
+    UID_SpatialFiducialsStorage,
+    UID_SurfaceSegmentationStorage,
+    UID_RealWorldValueMappingStorage,
+};
+static const int g_numOtherStorageSopClasses = sizeof(g_otherStorageSopClasses) / sizeof(g_otherStorageSopClasses[0]);
 
 // Helper: scan directory for DICOM files and return their paths.
 // DcmSCU's handleSTORERequest saves files WITHOUT .dcm extension (e.g. "SC.1.2.3..."),
@@ -2196,15 +2710,27 @@ DicomInstanceQueryResult* dcmtk_download_instances(const char* server_host, int 
     imageStorageTSList.push_back(UID_LittleEndianExplicitTransferSyntax);
     imageStorageTSList.push_back(UID_LittleEndianImplicitTransferSyntax);
     imageStorageTSList.push_back(UID_BigEndianExplicitTransferSyntax);
+    imageStorageTSList.push_back(UID_DeflatedExplicitVRLittleEndianTransferSyntax);
+    // JPEG
     imageStorageTSList.push_back(UID_JPEGProcess1TransferSyntax);
     imageStorageTSList.push_back(UID_JPEGProcess2_4TransferSyntax);
+    imageStorageTSList.push_back(UID_JPEGProcess14SV1TransferSyntax);        // JPEG Lossless SV1 — very common!
+    imageStorageTSList.push_back(UID_JPEGProcess14TransferSyntax);
+    // JPEG 2000
     imageStorageTSList.push_back(UID_JPEG2000LosslessOnlyTransferSyntax);
     imageStorageTSList.push_back(UID_JPEG2000TransferSyntax);
+    imageStorageTSList.push_back(UID_JPEG2000Part2MulticomponentImageCompressionLosslessOnlyTransferSyntax);
+    imageStorageTSList.push_back(UID_JPEG2000Part2MulticomponentImageCompressionTransferSyntax);
+    // HTJ2K (High-Throughput JPEG 2000)
+    imageStorageTSList.push_back(UID_HighThroughputJPEG2000ImageCompressionLosslessOnlyTransferSyntax);
+    imageStorageTSList.push_back(UID_HighThroughputJPEG2000ImageCompressionTransferSyntax);
+    // JPEG-LS
     imageStorageTSList.push_back(UID_JPEGLSLosslessTransferSyntax);
     imageStorageTSList.push_back(UID_JPEGLSLossyTransferSyntax);
+    // RLE
     imageStorageTSList.push_back(UID_RLELosslessTransferSyntax);
 
-    // Transfer syntaxes for video storage (MPEG)
+    // Transfer syntaxes for video storage (MPEG / HEVC)
     OFList<OFString> videoStorageTSList;
     videoStorageTSList.push_back(UID_MPEG4HighProfileLevel4_1TransferSyntax);
     videoStorageTSList.push_back(UID_MPEG4BDcompatibleHighProfileLevel4_1TransferSyntax);
@@ -2212,8 +2738,16 @@ DicomInstanceQueryResult* dcmtk_download_instances(const char* server_host, int 
     videoStorageTSList.push_back(UID_MPEG4HighProfileLevel4_2_For3DVideoTransferSyntax);
     videoStorageTSList.push_back(UID_MPEG2MainProfileAtMainLevelTransferSyntax);
     videoStorageTSList.push_back(UID_MPEG2MainProfileAtHighLevelTransferSyntax);
+    videoStorageTSList.push_back(UID_HEVCMainProfileLevel5_1TransferSyntax);
+    videoStorageTSList.push_back(UID_HEVCMain10ProfileLevel5_1TransferSyntax);
     videoStorageTSList.push_back(UID_LittleEndianExplicitTransferSyntax);
     videoStorageTSList.push_back(UID_LittleEndianImplicitTransferSyntax);
+
+    // Transfer syntaxes for non-image storage (presentation states, SR, KOS, etc.)
+    OFList<OFString> otherStorageTSList;
+    otherStorageTSList.push_back(UID_LittleEndianExplicitTransferSyntax);
+    otherStorageTSList.push_back(UID_LittleEndianImplicitTransferSyntax);
+    otherStorageTSList.push_back(UID_DeflatedExplicitVRLittleEndianTransferSyntax);
 
     OFList<OFString> queryTSList;
     queryTSList.push_back(UID_LittleEndianExplicitTransferSyntax);
@@ -2248,12 +2782,42 @@ DicomInstanceQueryResult* dcmtk_download_instances(const char* server_host, int 
                 scu.addPresentationContext(g_videoStorageSopClasses[i], videoStorageTSList, ASC_SC_ROLE_SCP);
             }
             
+            // Non-image storage SOP classes (presentation states, KOS, SR, etc.)
+            for (int i = 0; i < g_numOtherStorageSopClasses; i++) {
+                scu.addPresentationContext(g_otherStorageSopClasses[i], otherStorageTSList, ASC_SC_ROLE_SCP);
+            }
+            
+            DEBUG_LOG("C-GET: proposed %d image + %d video + %d other = %d storage presentation contexts",
+                g_numImageStorageSopClasses, g_numVideoStorageSopClasses, g_numOtherStorageSopClasses,
+                g_numImageStorageSopClasses + g_numVideoStorageSopClasses + g_numOtherStorageSopClasses);
+            
             OFCondition status = scu.initNetwork();
+            if (status.good()) {
+                if (!maybe_apply_tls(scu)) status = EC_IllegalParameter;
+            }
             if (status.good()) {
                 status = scu.negotiateAssociation();
             }
             
             if (status.good()) {
+                // Log negotiation results for diagnostics
+                int acceptedStorage = 0;
+                for (int i = 0; i < g_numImageStorageSopClasses; i++) {
+                    if (scu.findPresentationContextID(g_imageStorageSopClasses[i], "") != 0) {
+                        acceptedStorage++;
+                    } else {
+                        DEBUG_LOG("C-GET: server rejected image SOP %s", g_imageStorageSopClasses[i]);
+                    }
+                }
+                for (int i = 0; i < g_numVideoStorageSopClasses; i++) {
+                    if (scu.findPresentationContextID(g_videoStorageSopClasses[i], "") != 0) acceptedStorage++;
+                }
+                for (int i = 0; i < g_numOtherStorageSopClasses; i++) {
+                    if (scu.findPresentationContextID(g_otherStorageSopClasses[i], "") != 0) acceptedStorage++;
+                }
+                DEBUG_LOG("C-GET negotiation: %d storage contexts accepted out of %d proposed",
+                    acceptedStorage, g_numImageStorageSopClasses + g_numVideoStorageSopClasses + g_numOtherStorageSopClasses);
+                
                 T_ASC_PresentationContextID getPresID = scu.findPresentationContextID(
                     UID_GETStudyRootQueryRetrieveInformationModel, "");
                 
@@ -2283,7 +2847,12 @@ DicomInstanceQueryResult* dcmtk_download_instances(const char* server_host, int 
                         }
                         DEBUG_LOG("C-GET final: %d completed, %d failed", completed, failed);
                         if (completed == 0 && failed > 0) {
-                            cgetError = "C-GET: server reported " + std::to_string(failed) + " failed sub-operation(s)";
+                            cgetError = "C-GET: server reported " + std::to_string(failed) + " failed sub-operation(s)"
+                                " — the server could not send the file(s) in any negotiated transfer syntax/SOP class."
+                                " Check that the SOP Class of the instance is in the proposed storage contexts.";
+                        } else if (failed > 0) {
+                            // Partial success: some completed, some failed
+                            DEBUG_LOG("C-GET: partial success — %d completed, %d failed", completed, failed);
                         } else if (completed == 0 && failed == 0) {
                             cgetError = "C-GET: server completed with 0 sub-operations";
                         }
@@ -2633,6 +3202,536 @@ void dcmtk_free_video_extraction_result(VideoExtractionResult* result) {
         if (result->mime_type) free(result->mime_type);
         free(result);
     }
+}
+
+// ============================================================
+// C-STORE SCU: Send existing DICOM files to a remote PACS
+// ============================================================
+
+StoreResult* dcmtk_store_files(const char* server_host, int server_port,
+                                const char* ae_title, const char* called_ae_title,
+                                const char** file_paths, int file_count) {
+    DEBUG_LOG("Storing %d DICOM file(s) to %s:%d", file_count, server_host, server_port);
+
+    StoreResult* result = (StoreResult*)malloc(sizeof(StoreResult));
+    result->success_count = 0;
+    result->fail_count = 0;
+    result->total_count = file_count;
+    result->error = 0;
+    result->error_message = nullptr;
+
+    if (file_count <= 0 || !file_paths) {
+        result->error = 1;
+        result->error_message = strdup("No files to store");
+        return result;
+    }
+
+    try {
+        DcmSCU scu;
+        scu.setAETitle(ae_title);
+        scu.setPeerAETitle(called_ae_title);
+        scu.setPeerHostName(server_host);
+        scu.setPeerPort(server_port);
+        scu.setMaxReceivePDULength(16384);
+        scu.setACSETimeout(30);
+        scu.setDIMSETimeout(60);
+
+        // Collect all unique SOP classes and transfer syntaxes from the files
+        OFList<OFString> transferSyntaxes;
+        transferSyntaxes.push_back(UID_LittleEndianExplicitTransferSyntax);
+        transferSyntaxes.push_back(UID_LittleEndianImplicitTransferSyntax);
+        transferSyntaxes.push_back(UID_BigEndianExplicitTransferSyntax);
+        transferSyntaxes.push_back(UID_JPEGProcess1TransferSyntax);
+        transferSyntaxes.push_back(UID_JPEGProcess2_4TransferSyntax);
+        transferSyntaxes.push_back(UID_JPEGLSLosslessTransferSyntax);
+        transferSyntaxes.push_back(UID_JPEGLSLossyTransferSyntax);
+        transferSyntaxes.push_back(UID_JPEG2000LosslessOnlyTransferSyntax);
+        transferSyntaxes.push_back(UID_JPEG2000TransferSyntax);
+        transferSyntaxes.push_back(UID_RLELosslessTransferSyntax);
+        transferSyntaxes.push_back(UID_MPEG2MainProfileAtMainLevelTransferSyntax);
+
+        // Read SOP classes from files and add presentation contexts
+        std::vector<OFString> sopClasses;
+        for (int i = 0; i < file_count; i++) {
+            DcmFileFormat fileFormat;
+            OFCondition status = fileFormat.loadFile(file_paths[i]);
+            if (status.good()) {
+                OFString sopClassUID;
+                fileFormat.getDataset()->findAndGetOFString(DCM_SOPClassUID, sopClassUID);
+                if (!sopClassUID.empty()) {
+                    bool found = false;
+                    for (const auto& sc : sopClasses) {
+                        if (sc == sopClassUID) { found = true; break; }
+                    }
+                    if (!found) {
+                        sopClasses.push_back(sopClassUID);
+                        scu.addPresentationContext(sopClassUID, transferSyntaxes);
+                    }
+                }
+            }
+        }
+
+        // Add verification
+        OFList<OFString> verifTS;
+        verifTS.push_back(UID_LittleEndianImplicitTransferSyntax);
+        scu.addPresentationContext(UID_VerificationSOPClass, verifTS);
+
+        OFCondition cond = scu.initNetwork();
+        if (cond.bad()) {
+            result->error = 1;
+            std::string msg = "Network init failed: ";
+            msg += cond.text();
+            result->error_message = strdup(msg.c_str());
+            return result;
+        }
+        if (!maybe_apply_tls(scu)) {
+            result->error = 1;
+            result->error_message = strdup("TLS configuration failed");
+            return result;
+        }
+
+        cond = scu.negotiateAssociation();
+        if (cond.bad()) {
+            result->error = 1;
+            std::string msg = "Association failed: ";
+            msg += cond.text();
+            result->error_message = strdup(msg.c_str());
+            return result;
+        }
+
+        // Send each file
+        for (int i = 0; i < file_count; i++) {
+            DEBUG_LOG("Sending file %d/%d: %s", i + 1, file_count, file_paths[i]);
+
+            DcmFileFormat fileFormat;
+            OFCondition loadStatus = fileFormat.loadFile(file_paths[i]);
+            if (loadStatus.bad()) {
+                DEBUG_LOG("Failed to load file: %s", file_paths[i]);
+                result->fail_count++;
+                continue;
+            }
+
+            DcmDataset* dataset = fileFormat.getDataset();
+            OFString sopClassUID, sopInstanceUID;
+            dataset->findAndGetOFString(DCM_SOPClassUID, sopClassUID);
+            dataset->findAndGetOFString(DCM_SOPInstanceUID, sopInstanceUID);
+
+            T_ASC_PresentationContextID presID = scu.findPresentationContextID(sopClassUID, "");
+            if (presID == 0) {
+                DEBUG_LOG("No presentation context for SOP class: %s", sopClassUID.c_str());
+                result->fail_count++;
+                continue;
+            }
+
+            Uint16 rspStatusCode = 0;
+            cond = scu.sendSTORERequest(presID, "", dataset, rspStatusCode);
+            if (cond.good() && (rspStatusCode == 0x0000 || (rspStatusCode & 0xFF00) == 0xB000)) {
+                DEBUG_LOG("Successfully stored instance: %s", sopInstanceUID.c_str());
+                result->success_count++;
+            } else {
+                DEBUG_LOG("Store failed for instance %s: status 0x%04X", sopInstanceUID.c_str(), rspStatusCode);
+                result->fail_count++;
+            }
+        }
+
+        scu.releaseAssociation();
+        DEBUG_LOG("Store complete: %d/%d succeeded", result->success_count, file_count);
+
+    } catch (const std::exception& e) {
+        result->error = 1;
+        result->error_message = strdup(e.what());
+    }
+
+    return result;
+}
+
+void dcmtk_free_store_result(StoreResult* result) {
+    if (result) {
+        if (result->error_message) free(result->error_message);
+        free(result);
+    }
+}
+
+// ============================================================
+// C-STORE SCP: Receive DICOM files from remote peers
+// ============================================================
+
+// Global SCP state (single instance)
+static volatile int g_scp_running = 0;
+static volatile int g_scp_received_count = 0;
+static char* g_scp_storage_dir = nullptr;
+static int g_scp_port = 0;
+static char* g_scp_error = nullptr;
+
+// Custom SCP handler that saves received datasets to files
+class FlutterStoreSCP : public DcmSCP {
+public:
+    volatile bool m_shouldStop;
+
+    FlutterStoreSCP() : DcmSCP(), m_shouldStop(false) {}
+
+    // Override handleIncomingCommand to dispatch C-STORE and C-ECHO
+    OFCondition handleIncomingCommand(T_DIMSE_Message* incomingMsg,
+                                       const DcmPresentationContextInfo& presInfo) override {
+        if (incomingMsg->CommandField == DIMSE_C_STORE_RQ) {
+            DcmDataset* dataset = nullptr;
+            OFCondition cond = handleSTORERequest(incomingMsg->msg.CStoreRQ,
+                                                    presInfo.presentationContextID, dataset);
+            delete dataset; // we save within handleSTORERequest, so clean up
+            return cond;
+        }
+        if (incomingMsg->CommandField == DIMSE_C_ECHO_RQ) {
+            return handleECHORequest(incomingMsg->msg.CEchoRQ, presInfo.presentationContextID);
+        }
+        DEBUG_LOG("SCP: Unhandled command: 0x%04X", incomingMsg->CommandField);
+        return EC_Normal;
+    }
+
+    // Override handleSTORERequest to save received dataset to file
+    OFCondition handleSTORERequest(T_DIMSE_C_StoreRQ& reqMessage,
+                                    const T_ASC_PresentationContextID presID,
+                                    DcmDataset*& reqDataset) override {
+        DEBUG_LOG("SCP: Received C-STORE request for %s", reqMessage.AffectedSOPInstanceUID);
+
+        // Let base class receive the dataset and send response
+        OFCondition cond = DcmSCP::handleSTORERequest(reqMessage, presID, reqDataset);
+        if (cond.bad()) {
+            DEBUG_LOG("SCP: Base handleSTORERequest failed: %s", cond.text());
+            return cond;
+        }
+
+        // Save to file
+        if (reqDataset && g_scp_storage_dir) {
+            DcmFileFormat fileFormat(reqDataset);
+            std::string filePath = std::string(g_scp_storage_dir) + "/" +
+                                   reqMessage.AffectedSOPInstanceUID + ".dcm";
+
+            OFCondition saveStatus = fileFormat.saveFile(filePath.c_str(),
+                                                          EXS_LittleEndianExplicit);
+            if (saveStatus.good()) {
+                g_scp_received_count++;
+                DEBUG_LOG("SCP: Saved instance to %s (total: %d)", filePath.c_str(), g_scp_received_count);
+            } else {
+                DEBUG_LOG("SCP: Failed to save: %s", saveStatus.text());
+            }
+        }
+
+        return cond;
+    }
+
+    // Override to allow external stopping
+    OFBool stopAfterCurrentAssociation() override {
+        return m_shouldStop ? OFTrue : OFFalse;
+    }
+};
+
+static FlutterStoreSCP* g_scp_instance = nullptr;
+
+int dcmtk_start_store_scp(int port, const char* ae_title, const char* storage_dir) {
+    DEBUG_LOG("Starting C-STORE SCP on port %d, AE: %s, storage: %s", port, ae_title, storage_dir);
+
+    if (g_scp_running) {
+        DEBUG_LOG("SCP already running");
+        return 0;
+    }
+
+    // Create storage directory
+    struct stat st;
+    if (stat(storage_dir, &st) != 0) {
+        mkdir(storage_dir, 0755);
+    }
+
+    if (g_scp_storage_dir) free(g_scp_storage_dir);
+    g_scp_storage_dir = strdup(storage_dir);
+    g_scp_port = port;
+    g_scp_received_count = 0;
+    if (g_scp_error) { free(g_scp_error); g_scp_error = nullptr; }
+
+    try {
+        if (g_scp_instance) {
+            delete g_scp_instance;
+        }
+        g_scp_instance = new FlutterStoreSCP();
+
+        OFList<OFString> transferSyntaxes;
+        transferSyntaxes.push_back(UID_LittleEndianExplicitTransferSyntax);
+        transferSyntaxes.push_back(UID_LittleEndianImplicitTransferSyntax);
+        transferSyntaxes.push_back(UID_BigEndianExplicitTransferSyntax);
+        transferSyntaxes.push_back(UID_JPEGProcess1TransferSyntax);
+        transferSyntaxes.push_back(UID_JPEGProcess2_4TransferSyntax);
+        transferSyntaxes.push_back(UID_JPEGLSLosslessTransferSyntax);
+        transferSyntaxes.push_back(UID_JPEG2000LosslessOnlyTransferSyntax);
+        transferSyntaxes.push_back(UID_RLELosslessTransferSyntax);
+
+        DcmSCPConfig& config = g_scp_instance->getConfig();
+        config.setAETitle(ae_title);
+        config.setPort(port);
+        config.setMaxReceivePDULength(16384);
+        config.setConnectionTimeout(60);
+
+        // Accept all standard SOP classes with all transfer syntaxes
+        const char* sopClasses[] = {
+            UID_VerificationSOPClass,
+            UID_CTImageStorage,
+            UID_MRImageStorage,
+            UID_UltrasoundImageStorage,
+            UID_SecondaryCaptureImageStorage,
+            UID_DigitalXRayImageStorageForPresentation,
+            UID_DigitalXRayImageStorageForProcessing,
+            UID_ComputedRadiographyImageStorage,
+            UID_NuclearMedicineImageStorage,
+            UID_XRayAngiographicImageStorage,
+            UID_XRayRadiofluoroscopicImageStorage,
+            UID_MultiframeTrueColorSecondaryCaptureImageStorage,
+            UID_MultiframeGrayscaleByteSecondaryCaptureImageStorage,
+            UID_VideoEndoscopicImageStorage,
+            UID_EncapsulatedPDFStorage,
+            nullptr
+        };
+
+        for (int i = 0; sopClasses[i] != nullptr; i++) {
+            config.addPresentationContext(sopClasses[i], transferSyntaxes);
+        }
+
+        g_scp_running = 1;
+
+        // Listen (this blocks — caller should run in a background thread)
+        OFCondition cond = g_scp_instance->listen();
+        g_scp_running = 0;
+
+        if (cond.bad()) {
+            g_scp_error = strdup(cond.text());
+            DEBUG_LOG("SCP stopped with error: %s", cond.text());
+            return 0;
+        }
+
+        DEBUG_LOG("SCP stopped normally");
+        return 1;
+
+    } catch (const std::exception& e) {
+        g_scp_running = 0;
+        g_scp_error = strdup(e.what());
+        DEBUG_LOG("SCP exception: %s", e.what());
+        return 0;
+    }
+}
+
+void dcmtk_stop_store_scp(void) {
+    DEBUG_LOG("Stopping C-STORE SCP");
+    if (g_scp_instance) {
+        g_scp_instance->m_shouldStop = true;
+    }
+    g_scp_running = 0;
+}
+
+StoreSCPStatus* dcmtk_get_store_scp_status(void) {
+    StoreSCPStatus* status = (StoreSCPStatus*)malloc(sizeof(StoreSCPStatus));
+    status->running = g_scp_running;
+    status->port = g_scp_port;
+    status->received_count = g_scp_received_count;
+    status->storage_dir = g_scp_storage_dir ? strdup(g_scp_storage_dir) : nullptr;
+    status->error_message = g_scp_error ? strdup(g_scp_error) : nullptr;
+    return status;
+}
+
+void dcmtk_free_store_scp_status(StoreSCPStatus* status) {
+    if (status) {
+        if (status->storage_dir) free(status->storage_dir);
+        if (status->error_message) free(status->error_message);
+        free(status);
+    }
+}
+
+// ============================================================
+// C-MOVE: Retrieve instances via C-MOVE
+// ============================================================
+
+DicomInstanceQueryResult* dcmtk_move_instances(const char* server_host, int server_port,
+                                                const char* ae_title, const char* called_ae_title,
+                                                const char* series_instance_uid,
+                                                const char* local_storage_path,
+                                                int move_scp_port) {
+    DEBUG_LOG("C-MOVE retrieval for series %s from %s:%d (SCP port %d)",
+              series_instance_uid, server_host, server_port, move_scp_port);
+
+    DicomInstanceQueryResult* result = (DicomInstanceQueryResult*)malloc(sizeof(DicomInstanceQueryResult));
+    result->instances = nullptr;
+    result->instance_count = 0;
+    result->error = 0;
+    result->error_message = nullptr;
+
+    // Create storage directory
+    struct stat st;
+    if (stat(local_storage_path, &st) != 0) {
+        mkdir(local_storage_path, 0755);
+    }
+
+    // First, start a temporary SCP to receive the moved instances
+    // We'll collect files after the SCP finishes
+    int prev_received = g_scp_received_count;
+
+    try {
+        DcmSCU scu;
+        scu.setAETitle(ae_title);
+        scu.setPeerAETitle(called_ae_title);
+        scu.setPeerHostName(server_host);
+        scu.setPeerPort(server_port);
+        scu.setMaxReceivePDULength(16384);
+        scu.setACSETimeout(30);
+        scu.setDIMSETimeout(120);
+
+        OFList<OFString> transferSyntaxes;
+        transferSyntaxes.push_back(UID_LittleEndianExplicitTransferSyntax);
+        transferSyntaxes.push_back(UID_LittleEndianImplicitTransferSyntax);
+
+        scu.addPresentationContext(UID_FINDStudyRootQueryRetrieveInformationModel, transferSyntaxes);
+        scu.addPresentationContext(UID_MOVEStudyRootQueryRetrieveInformationModel, transferSyntaxes);
+        scu.addPresentationContext(UID_VerificationSOPClass, transferSyntaxes);
+
+        OFCondition cond = scu.initNetwork();
+        if (cond.bad()) {
+            result->error = 1;
+            std::string msg = "C-MOVE network init failed: ";
+            msg += cond.text();
+            result->error_message = strdup(msg.c_str());
+            return result;
+        }
+        if (!maybe_apply_tls(scu)) {
+            result->error = 1;
+            result->error_message = strdup("TLS configuration failed");
+            return result;
+        }
+
+        cond = scu.negotiateAssociation();
+        if (cond.bad()) {
+            result->error = 1;
+            std::string msg = "C-MOVE association failed: ";
+            msg += cond.text();
+            result->error_message = strdup(msg.c_str());
+            return result;
+        }
+
+        T_ASC_PresentationContextID presID = scu.findPresentationContextID(
+            UID_MOVEStudyRootQueryRetrieveInformationModel, "");
+        if (presID == 0) {
+            scu.releaseAssociation();
+            result->error = 1;
+            result->error_message = strdup("No C-MOVE presentation context accepted");
+            return result;
+        }
+
+        // Build the move request
+        DcmDataset moveQuery;
+        moveQuery.putAndInsertOFStringArray(DCM_QueryRetrieveLevel, "SERIES");
+        moveQuery.putAndInsertOFStringArray(DCM_SeriesInstanceUID, series_instance_uid);
+
+        // Send C-MOVE request — the server will send back via C-STORE sub-operations
+        // The destination is our own AE title (requires SCP to be running)
+        OFList<RetrieveResponse*> responses;
+        cond = scu.sendMOVERequest(presID, ae_title, &moveQuery, &responses);
+
+        if (cond.bad()) {
+            scu.releaseAssociation();
+            result->error = 1;
+            std::string msg = "C-MOVE request failed: ";
+            msg += cond.text();
+            result->error_message = strdup(msg.c_str());
+            return result;
+        }
+
+        // Check responses
+        int completedOps = 0;
+        int failedOps = 0;
+        for (OFListIterator(RetrieveResponse*) it = responses.begin(); it != responses.end(); ++it) {
+            if (*it) {
+                Uint16 status = (*it)->m_status;
+                if (status == STATUS_Success || status == STATUS_Pending) {
+                    completedOps++;
+                } else if ((status & 0xFF00) == STATUS_MOVE_Failed_UnableToProcess) {
+                    failedOps++;
+                }
+            }
+        }
+
+        scu.releaseAssociation();
+
+        DEBUG_LOG("C-MOVE completed: %d responses, %d failed", completedOps, failedOps);
+
+        // Collect files that were stored by the SCP
+        // (files should now be in local_storage_path if SCP was running)
+        DIR* dir = opendir(local_storage_path);
+        if (dir) {
+            std::vector<std::string> filePaths;
+            struct dirent* entry;
+            while ((entry = readdir(dir)) != nullptr) {
+                std::string name = entry->d_name;
+                if (name.length() > 4 && name.substr(name.length() - 4) == ".dcm") {
+                    filePaths.push_back(std::string(local_storage_path) + "/" + name);
+                }
+            }
+            closedir(dir);
+
+            if (!filePaths.empty()) {
+                result->instance_count = (int)filePaths.size();
+                result->instances = (DicomInstance*)calloc(result->instance_count, sizeof(DicomInstance));
+                for (int i = 0; i < result->instance_count; i++) {
+                    result->instances[i].file_path = strdup(filePaths[i].c_str());
+                    result->instances[i].sop_instance_uid = nullptr;
+                    result->instances[i].instance_number = nullptr;
+                    result->instances[i].content_type = nullptr;
+                    result->instances[i].file_size = 0;
+
+                    struct stat fileStat;
+                    if (stat(filePaths[i].c_str(), &fileStat) == 0) {
+                        result->instances[i].file_size = (int)fileStat.st_size;
+                    }
+                }
+            }
+        }
+
+        DEBUG_LOG("C-MOVE collected %d files", result->instance_count);
+
+    } catch (const std::exception& e) {
+        result->error = 1;
+        result->error_message = strdup(e.what());
+    }
+
+    return result;
+}
+
+// ============================================================================
+// TLS Configuration API
+// ============================================================================
+
+void dcmtk_set_tls_config(const char* cert_file, const char* key_file, const char* ca_file) {
+    g_tlsConfig.certFile = cert_file ? cert_file : "";
+    g_tlsConfig.keyFile  = key_file  ? key_file  : "";
+    g_tlsConfig.caFile   = ca_file   ? ca_file   : "";
+    g_tlsConfig.enabled  = true;
+    DEBUG_LOG("TLS config set: cert=%s, key=%s, ca=%s",
+              g_tlsConfig.certFile.c_str(),
+              g_tlsConfig.keyFile.c_str(),
+              g_tlsConfig.caFile.c_str());
+}
+
+void dcmtk_clear_tls_config(void) {
+    g_tlsConfig.certFile.clear();
+    g_tlsConfig.keyFile.clear();
+    g_tlsConfig.caFile.clear();
+    g_tlsConfig.enabled = false;
+    DEBUG_LOG("TLS config cleared");
+}
+
+int dcmtk_is_tls_available(void) {
+#ifdef WITH_OPENSSL
+    return 1;
+#else
+    return 0;
+#endif
+}
+
+int dcmtk_is_tls_enabled(void) {
+    return g_tlsConfig.enabled ? 1 : 0;
 }
 
 }

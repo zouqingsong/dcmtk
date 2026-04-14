@@ -119,3 +119,6 @@ oficonv/apps/mkesdb
 /flutter_plugin/example/ios/Pods
 /flutter_plugin/example/ios/.symlinks
 /flutter_plugin/example/ios/Flutter/.last_build_id
+.vscode/launch.json
+/flutter_plugin/.dart_tool
+/flutter_plugin/.dart_tool

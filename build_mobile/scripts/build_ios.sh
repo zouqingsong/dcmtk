@@ -1,4 +1,4 @@
-./build_mobile/scripts/build_all.sh --platform all#!/bin/bash
+#!/bin/bash
 set -e
 
 # Build DCMTK for iOS
@@ -10,6 +10,21 @@ TOOLCHAIN_FILE="$PROJECT_ROOT/build_mobile/toolchains/ios.cmake"
 echo "Building DCMTK for iOS..."
 echo "Project root: $PROJECT_ROOT"
 echo "Build directory: $BUILD_DIR"
+
+# Build OpenSSL first if not already built
+OPENSSL_BASE_DIR="$BUILD_DIR/openssl/install"
+if [ ! -f "$OPENSSL_BASE_DIR/device/lib/libssl.a" ]; then
+    echo "Building OpenSSL for iOS..."
+    bash "$SCRIPT_DIR/build_openssl_ios.sh"
+fi
+
+HAS_OPENSSL=0
+if [ -f "$OPENSSL_BASE_DIR/device/lib/libssl.a" ] && [ -f "$OPENSSL_BASE_DIR/simulator/lib/libssl.a" ]; then
+    HAS_OPENSSL=1
+    echo "OpenSSL found, TLS support will be enabled"
+else
+    echo "OpenSSL not found, building without TLS support"
+fi
 
 # Check if we're on macOS
 if [[ "$OSTYPE" != "darwin"* ]]; then
@@ -44,11 +59,24 @@ for i in "${!IOS_PLATFORMS[@]}"; do
     
     cd "$PLATFORM_BUILD_DIR"
     
+    # Determine OpenSSL root for this platform
+    OPENSSL_CMAKE_FLAGS=""
+    if [ "$HAS_OPENSSL" -eq 1 ]; then
+        if [ "$PLATFORM" = "OS" ]; then
+            OPENSSL_ROOT="$OPENSSL_BASE_DIR/device"
+        else
+            OPENSSL_ROOT="$OPENSSL_BASE_DIR/simulator"
+        fi
+        OPENSSL_CMAKE_FLAGS="-DOPENSSL_ROOT_DIR=$OPENSSL_ROOT"
+    fi
+
     cmake -G "Unix Makefiles" \
         -DCMAKE_TOOLCHAIN_FILE="$TOOLCHAIN_FILE" \
         -DIOS_PLATFORM="$PLATFORM" \
         -DCMAKE_BUILD_TYPE=Release \
         -DCMAKE_INSTALL_PREFIX="$PLATFORM_BUILD_DIR/install" \
+        -DDCMTK_DEFAULT_DICT=builtin \
+        $OPENSSL_CMAKE_FLAGS \
         "$PROJECT_ROOT"
     
     # Build the libraries
@@ -111,6 +139,16 @@ for PLATFORM in "OS" "SIMULATOR64"; do
         MIN_OS_FLAG="-mios-simulator-version-min=11.0"
     fi
     
+    # OpenSSL include path for wrapper (WITH_OPENSSL is already defined in osconfig.h)
+    OPENSSL_WRAPPER_FLAGS=""
+    if [ "$HAS_OPENSSL" -eq 1 ]; then
+        if [ "$PLATFORM" == "OS" ]; then
+            OPENSSL_WRAPPER_FLAGS="-I$OPENSSL_BASE_DIR/device/include"
+        else
+            OPENSSL_WRAPPER_FLAGS="-I$OPENSSL_BASE_DIR/simulator/include"
+        fi
+    fi
+
     echo "Compiling wrapper for $PLATFORM..."
     echo "SDK: $SDK, Min OS flag: $MIN_OS_FLAG"
     
@@ -133,6 +171,7 @@ for PLATFORM in "OS" "SIMULATOR64"; do
         -I"$PROJECT_ROOT/dcmtls/include" \
         -I"$WRAPPER_DIR" \
         -DHAVE_CONFIG_H \
+        $OPENSSL_WRAPPER_FLAGS \
         -c "$WRAPPER_SRC" \
         -o "$WRAPPER_OBJ"
     
@@ -167,6 +206,23 @@ done
 # Extract wrapper (it's already thin arm64, not a fat archive)
 ar -x "$WRAPPER_OBJ_DIR/libdcmtk_flutter_wrapper_OS.a"
 
+# Extract OpenSSL libraries if available
+if [ "$HAS_OPENSSL" -eq 1 ]; then
+    for lib in "$OPENSSL_BASE_DIR/device/lib"/*.a; do
+        LIB_BASE="$(basename "$lib" .a)"
+        LIB_OBJ_DIR="$DEVICE_OBJ_DIR/${LIB_BASE}_objs"
+        mkdir -p "$LIB_OBJ_DIR"
+        echo "Extracting $(basename $lib) (OpenSSL)..."
+        cd "$LIB_OBJ_DIR"
+        ar -x "$lib"
+        for obj in *.o; do
+            mv "$obj" "$DEVICE_OBJ_DIR/openssl_${LIB_BASE}_${obj}"
+        done
+        cd "$DEVICE_OBJ_DIR"
+        rm -rf "$LIB_OBJ_DIR"
+    done
+fi
+
 # Create combined device library
 echo "Combining device objects..."
 ar -rcs "$DEVICE_LIB_DIR/libdcmtk.a" *.o
@@ -197,6 +253,26 @@ done
 # Extract wrapper (already arm64-only, no need for lipo)
 ar -x "$WRAPPER_OBJ_DIR/libdcmtk_flutter_wrapper_SIMULATOR64.a"
 
+# Extract OpenSSL libraries if available
+if [ "$HAS_OPENSSL" -eq 1 ]; then
+    for lib in "$OPENSSL_BASE_DIR/simulator/lib"/*.a; do
+        LIB_BASE="$(basename "$lib" .a)"
+        LIB_OBJ_DIR="$SIMULATOR_OBJ_DIR/${LIB_BASE}_objs"
+        mkdir -p "$LIB_OBJ_DIR"
+        echo "Extracting $(basename $lib) (OpenSSL)..."
+        cd "$LIB_OBJ_DIR"
+        ar -x "$lib"
+        for obj in *.o; do
+            # Fix platform tag: OpenSSL simulator objects have LC_VERSION_MIN_IPHONEOS
+            # which is wrong for simulator. Rewrite to iossim platform.
+            vtool -set-build-version iossim 14.0 26.4 -replace -output "$SIMULATOR_OBJ_DIR/openssl_${LIB_BASE}_${obj}" "$obj" 2>/dev/null || \
+                mv "$obj" "$SIMULATOR_OBJ_DIR/openssl_${LIB_BASE}_${obj}"
+        done
+        cd "$SIMULATOR_OBJ_DIR"
+        rm -rf "$LIB_OBJ_DIR"
+    done
+fi
+
 # Create combined simulator library
 echo "Combining simulator objects..."
 ar -rcs "$SIMULATOR_LIB_DIR/libdcmtk.a" *.o
@@ -208,7 +284,9 @@ rm -rf "$XCFRAMEWORK_DIR/dcmtk.xcframework"
 
 xcodebuild -create-xcframework \
     -library "$DEVICE_LIB_DIR/libdcmtk.a" \
+    -headers "$BUILD_DIR/OS/install/include" \
     -library "$SIMULATOR_LIB_DIR/libdcmtk.a" \
+    -headers "$BUILD_DIR/SIMULATOR/install/include" \
     -output "$XCFRAMEWORK_DIR/dcmtk.xcframework"
 
 echo "iOS build completed successfully!"

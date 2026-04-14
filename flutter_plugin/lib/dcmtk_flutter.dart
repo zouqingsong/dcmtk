@@ -84,12 +84,17 @@ class DcmtkFlutter {
   /// Extract image from DICOM file
   /// Returns Map with 'width', 'height', 'data' (Uint8List of RGBA pixels),
   /// 'samplesPerPixel', 'bitsStored', 'totalFrames'
-  Future<Map<String, dynamic>?> extractImage(String filePath, {int frameIndex = 0}) async {
+  /// On error, returns Map with 'error' key containing the error message.
+  /// Optional [windowCenter] and [windowWidth] for custom window/level (grayscale only).
+  /// If windowWidth is 0 or not provided, the default window from the DICOM file is used.
+  Future<Map<String, dynamic>?> extractImage(String filePath, {int frameIndex = 0, double windowCenter = 0, double windowWidth = 0}) async {
     if (Platform.isIOS) {
       try {
         final Map<dynamic, dynamic> result = await _methodChannel.invokeMethod('extractImage', {
           'filePath': filePath,
           'frameIndex': frameIndex,
+          'windowCenter': windowCenter,
+          'windowWidth': windowWidth,
         });
         return {
           'width': result['width'] as int,
@@ -101,7 +106,7 @@ class DcmtkFlutter {
         };
       } on PlatformException catch (e) {
         print("Error extracting image: ${e.message}");
-        return null;
+        return {'error': e.message ?? 'Unknown extraction error'};
       }
     } else if (Platform.isAndroid) {
       // TODO: Implement Android FFI image extraction
@@ -466,8 +471,11 @@ class DcmtkFlutter {
     String seriesDescription = 'Uploaded Series',
     String imageComments = '',
     String modality = 'SC',
+    String studyInstanceUID = '',
+    String seriesInstanceUID = '',
+    int instanceNumber = 1,
   }) async {
-    print('[Dart] uploadImage called with: host=$serverHost, port=$serverPort, patientId=$patientId, imagePath=$imagePath');
+    print('[Dart] uploadImage called with: host=$serverHost, port=$serverPort, patientId=$patientId, imagePath=$imagePath, instance#=$instanceNumber');
     if (Platform.isIOS) {
       try {
         print('[Dart] Calling iOS method channel for uploadImage');
@@ -482,6 +490,9 @@ class DcmtkFlutter {
           'seriesDescription': seriesDescription,
           'imageComments': imageComments,
           'modality': modality,
+          'studyInstanceUID': studyInstanceUID,
+          'seriesInstanceUID': seriesInstanceUID,
+          'instanceNumber': instanceNumber,
         });
         print('[Dart] iOS method channel returned: $result');
         return Map<String, dynamic>.from(result as Map);
@@ -491,6 +502,52 @@ class DcmtkFlutter {
       }
     } else if (Platform.isAndroid) {
       // TODO: Implement Android FFI image upload
+      return {'success': false, 'error': 'Not implemented for Android'};
+    } else {
+      return {'success': false, 'error': 'Platform not supported'};
+    }
+  }
+
+  /// Upload multiple images as a single multi-frame DICOM instance
+  /// Returns upload result with generated UIDs
+  Future<Map<String, dynamic>> uploadMultiframe({
+    required String serverHost,
+    required int serverPort,
+    required String aeTitle,
+    required String calledAeTitle,
+    required String patientId,
+    required List<String> imagePaths,
+    String studyDescription = 'Uploaded Image',
+    String seriesDescription = 'Uploaded Series',
+    String imageComments = '',
+    String modality = 'SC',
+    String studyInstanceUID = '',
+    String seriesInstanceUID = '',
+  }) async {
+    print('[Dart] uploadMultiframe called with: host=$serverHost, port=$serverPort, patientId=$patientId, ${imagePaths.length} images');
+    if (Platform.isIOS) {
+      try {
+        final dynamic result = await _methodChannel.invokeMethod('uploadMultiframe', {
+          'serverHost': serverHost,
+          'serverPort': serverPort,
+          'aeTitle': aeTitle,
+          'calledAeTitle': calledAeTitle,
+          'patientId': patientId,
+          'imagePaths': imagePaths,
+          'studyDescription': studyDescription,
+          'seriesDescription': seriesDescription,
+          'imageComments': imageComments,
+          'modality': modality,
+          'studyInstanceUID': studyInstanceUID,
+          'seriesInstanceUID': seriesInstanceUID,
+        });
+        print('[Dart] iOS method channel returned: $result');
+        return Map<String, dynamic>.from(result as Map);
+      } on PlatformException catch (e) {
+        print("[Dart] Error uploading multiframe: ${e.message}");
+        return {'success': false, 'error': e.message};
+      }
+    } else if (Platform.isAndroid) {
       return {'success': false, 'error': 'Not implemented for Android'};
     } else {
       return {'success': false, 'error': 'Platform not supported'};
@@ -536,6 +593,146 @@ class DcmtkFlutter {
     } else {
       return {'success': false, 'error': 'Platform not supported'};
     }
+  }
+
+  // ============================================================
+  // C-STORE SCU: Send existing DICOM files to a remote PACS
+  // ============================================================
+  Future<Map<String, dynamic>> storeFiles({
+    required String serverHost,
+    required int serverPort,
+    required String aeTitle,
+    required String calledAeTitle,
+    required List<String> filePaths,
+  }) async {
+    if (Platform.isIOS) {
+      try {
+        final dynamic result = await _methodChannel.invokeMethod('storeFiles', {
+          'serverHost': serverHost,
+          'serverPort': serverPort,
+          'aeTitle': aeTitle,
+          'calledAeTitle': calledAeTitle,
+          'filePaths': filePaths,
+        });
+        return Map<String, dynamic>.from(result as Map);
+      } on PlatformException catch (e) {
+        return {'error': 1, 'errorMessage': e.message};
+      }
+    }
+    return {'error': 1, 'errorMessage': 'Platform not supported'};
+  }
+
+  // ============================================================
+  // C-STORE SCP: Receive DICOM files from remote peers
+  // ============================================================
+  Future<Map<String, dynamic>> startStoreSCP({
+    required int port,
+    required String aeTitle,
+    required String storageDir,
+  }) async {
+    if (Platform.isIOS) {
+      try {
+        final dynamic result = await _methodChannel.invokeMethod('startStoreSCP', {
+          'port': port,
+          'aeTitle': aeTitle,
+          'storageDir': storageDir,
+        });
+        return Map<String, dynamic>.from(result as Map);
+      } on PlatformException catch (e) {
+        return {'started': false, 'error': e.message};
+      }
+    }
+    return {'started': false, 'error': 'Platform not supported'};
+  }
+
+  Future<Map<String, dynamic>> stopStoreSCP() async {
+    if (Platform.isIOS) {
+      try {
+        final dynamic result = await _methodChannel.invokeMethod('stopStoreSCP');
+        return Map<String, dynamic>.from(result as Map);
+      } on PlatformException catch (e) {
+        return {'stopped': false, 'error': e.message};
+      }
+    }
+    return {'stopped': false, 'error': 'Platform not supported'};
+  }
+
+  Future<Map<String, dynamic>> getStoreSCPStatus() async {
+    if (Platform.isIOS) {
+      try {
+        final dynamic result = await _methodChannel.invokeMethod('getStoreSCPStatus');
+        return Map<String, dynamic>.from(result as Map);
+      } on PlatformException catch (e) {
+        return {'running': 0, 'error': e.message};
+      }
+    }
+    return {'running': 0, 'error': 'Platform not supported'};
+  }
+
+  // ============================================================
+  // C-MOVE: Retrieve instances via C-MOVE
+  // ============================================================
+  Future<Map<String, dynamic>> moveInstances({
+    required String serverHost,
+    required int serverPort,
+    required String aeTitle,
+    required String calledAeTitle,
+    required String seriesInstanceUID,
+    required String localStoragePath,
+    int moveSCPPort = 11113,
+  }) async {
+    if (Platform.isIOS) {
+      try {
+        final dynamic result = await _methodChannel.invokeMethod('moveInstances', {
+          'serverHost': serverHost,
+          'serverPort': serverPort,
+          'aeTitle': aeTitle,
+          'calledAeTitle': calledAeTitle,
+          'seriesInstanceUID': seriesInstanceUID,
+          'localStoragePath': localStoragePath,
+          'moveSCPPort': moveSCPPort,
+        });
+        return Map<String, dynamic>.from(result as Map);
+      } on PlatformException catch (e) {
+        return {'error': 1, 'errorMessage': e.message};
+      }
+    }
+    return {'error': 1, 'errorMessage': 'Platform not supported'};
+  }
+
+  // ==================== TLS Configuration ====================
+
+  /// Set TLS configuration. Once set, all subsequent SCU operations use TLS.
+  /// Pass null or empty for files you don't have (e.g. no client cert).
+  Future<bool> setTlsConfig({
+    String? certFile,
+    String? keyFile,
+    String? caFile,
+  }) async {
+    final result = await _methodChannel.invokeMethod('setTlsConfig', {
+      'certFile': certFile ?? '',
+      'keyFile': keyFile ?? '',
+      'caFile': caFile ?? '',
+    });
+    return result == true || result == 1;
+  }
+
+  /// Clear TLS configuration, revert to plaintext connections.
+  Future<bool> clearTlsConfig() async {
+    final result = await _methodChannel.invokeMethod('clearTlsConfig');
+    return result == true || result == 1;
+  }
+
+  /// Check if OpenSSL is compiled into the native library.
+  Future<bool> isTlsAvailable() async {
+    final result = await _methodChannel.invokeMethod('isTlsAvailable');
+    return result == true || result == 1;
+  }
+
+  /// Check if TLS is currently enabled.
+  Future<bool> isTlsEnabled() async {
+    final result = await _methodChannel.invokeMethod('isTlsEnabled');
+    return result == true || result == 1;
   }
 }
 

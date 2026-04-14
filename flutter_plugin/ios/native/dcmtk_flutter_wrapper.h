@@ -35,7 +35,7 @@ typedef struct {
     char* error_message;
 } DicomImageData;
 
-DicomImageData* dcmtk_extract_image(const char* filename, int frame_index);
+DicomImageData* dcmtk_extract_image(const char* filename, int frame_index, double window_center, double window_width);
 void dcmtk_free_image_data(DicomImageData* img_data);
 
 // DICOM Server Communication
@@ -45,6 +45,7 @@ typedef struct {
     char* patient_birth_date;
     char* patient_sex;
     int study_count;
+    char* number_of_patient_related_studies;
 } DicomPatient;
 
 typedef struct {
@@ -54,6 +55,10 @@ typedef struct {
     char* study_description;
     char* accession_number;
     int series_count;
+    char* modalities_in_study;
+    char* number_of_study_related_series;
+    char* number_of_study_related_instances;
+    char* referring_physician_name;
 } DicomStudy;
 
 typedef struct {
@@ -78,6 +83,8 @@ typedef struct {
     char* series_date;
     char* series_time;
     int instance_count;
+    char* number_of_series_related_instances;
+    char* body_part_examined;
 } DicomSeries;
 
 typedef struct {
@@ -142,7 +149,8 @@ DicomInstanceQueryResult* dcmtk_query_instances_for_series(const char* server_ho
 PatientCreationResult* dcmtk_create_patient(const char* server_host, int server_port, const char* ae_title, const char* called_ae_title, PatientInfo* patient_info);
 
 // Media upload functions
-MediaUploadResult* dcmtk_upload_image(const char* server_host, int server_port, const char* ae_title, const char* called_ae_title, const char* patient_id, const char* image_path, const char* study_description, const char* series_description, const char* image_comments, const char* modality);
+MediaUploadResult* dcmtk_upload_image(const char* server_host, int server_port, const char* ae_title, const char* called_ae_title, const char* patient_id, const char* image_path, const char* study_description, const char* series_description, const char* image_comments, const char* modality, const char* study_instance_uid, const char* series_instance_uid, int instance_number);
+MediaUploadResult* dcmtk_upload_multiframe(const char* server_host, int server_port, const char* ae_title, const char* called_ae_title, const char* patient_id, const char** image_paths, int image_count, const char* study_description, const char* series_description, const char* image_comments, const char* modality, const char* study_instance_uid, const char* series_instance_uid);
 MediaUploadResult* dcmtk_upload_video(const char* server_host, int server_port, const char* ae_title, const char* called_ae_title, const char* patient_id, const char* video_path, const char* study_description, const char* series_description, const char* image_comments, const char* modality);
 
 // Media retrieval functions
@@ -160,6 +168,45 @@ typedef struct {
 VideoExtractionResult* dcmtk_extract_video(const char* dicom_path, const char* output_path);
 void dcmtk_free_video_extraction_result(VideoExtractionResult* result);
 
+// === C-STORE SCU: Send existing DICOM files to a remote PACS ===
+typedef struct {
+    int success_count;
+    int fail_count;
+    int total_count;
+    int error;
+    char* error_message;
+} StoreResult;
+
+StoreResult* dcmtk_store_files(const char* server_host, int server_port,
+                                const char* ae_title, const char* called_ae_title,
+                                const char** file_paths, int file_count);
+void dcmtk_free_store_result(StoreResult* result);
+
+// === C-STORE SCP: Receive DICOM files from remote peers ===
+typedef struct {
+    int running;    // 1 if SCP is running, 0 if stopped
+    int port;
+    int received_count;
+    char* storage_dir;
+    char* error_message;
+} StoreSCPStatus;
+
+// Start SCP listener on given port, storing received files in storage_dir
+// Returns 1 on success, 0 on failure
+int dcmtk_start_store_scp(int port, const char* ae_title, const char* storage_dir);
+// Stop the running SCP listener
+void dcmtk_stop_store_scp(void);
+// Get current SCP status
+StoreSCPStatus* dcmtk_get_store_scp_status(void);
+void dcmtk_free_store_scp_status(StoreSCPStatus* status);
+
+// === C-MOVE: Retrieve instances via C-MOVE ===
+DicomInstanceQueryResult* dcmtk_move_instances(const char* server_host, int server_port,
+                                                const char* ae_title, const char* called_ae_title,
+                                                const char* series_instance_uid,
+                                                const char* local_storage_path,
+                                                int move_scp_port);
+
 // Memory cleanup functions
 void dcmtk_free_query_result(DicomQueryResult* result);
 void dcmtk_free_study_query_result(DicomStudyQueryResult* result);
@@ -167,6 +214,17 @@ void dcmtk_free_series_query_result(DicomSeriesQueryResult* result);
 void dcmtk_free_instance_query_result(DicomInstanceQueryResult* result);
 void dcmtk_free_patient_creation_result(PatientCreationResult* result);
 void dcmtk_free_media_upload_result(MediaUploadResult* result);
+
+// === TLS Configuration API ===
+// Set TLS cert/key/CA files. Once set, all subsequent SCU operations use TLS.
+// Pass NULL or empty string for any file to skip it.
+void dcmtk_set_tls_config(const char* cert_file, const char* key_file, const char* ca_file);
+// Clear TLS configuration, reverting to plaintext connections.
+void dcmtk_clear_tls_config(void);
+// Returns 1 if OpenSSL is compiled in, 0 otherwise.
+int dcmtk_is_tls_available(void);
+// Returns 1 if TLS is currently enabled, 0 otherwise.
+int dcmtk_is_tls_enabled(void);
 
 #ifdef __cplusplus
 }
