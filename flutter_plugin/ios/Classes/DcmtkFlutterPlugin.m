@@ -614,7 +614,7 @@ extern "C" {
       const char* cStudyDescription = sStudyDesc ? [sStudyDesc UTF8String] : "Uploaded Image";
       const char* cSeriesDescription = sSeriesDesc ? [sSeriesDesc UTF8String] : "Uploaded Series";
       const char* cImageComments = sComments ? [sComments UTF8String] : "";
-      const char* cModality = sModality ? [sModality UTF8String] : "SC";
+      const char* cModality = sModality && [sModality length] > 0 ? [sModality UTF8String] : NULL;
       const char* cStudyInstanceUID = sStudyUID ? [sStudyUID UTF8String] : "";
       const char* cSeriesInstanceUID = sSeriesUID ? [sSeriesUID UTF8String] : "";
     

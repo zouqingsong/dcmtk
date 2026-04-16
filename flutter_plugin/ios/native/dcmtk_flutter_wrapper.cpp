@@ -16,6 +16,7 @@
 #include <dcmtk/dcmdata/libi2d/i2djpgs.h>
 #include <dcmtk/dcmdata/libi2d/i2dbmps.h>
 #include <dcmtk/dcmdata/libi2d/i2dplsc.h>
+#include <dcmtk/dcmdata/libi2d/i2dplvlp.h>
 #ifdef WITH_OPENSSL
 #include <dcmtk/dcmtls/tlslayer.h>
 #endif
@@ -1385,8 +1386,7 @@ PatientCreationResult* dcmtk_create_patient(const char* server_host, int server_
         const char* paths[1] = { tmpPath.c_str() };
         StoreResult* storeResult = dcmtk_store_files(server_host, server_port, ae_title, called_ae_title, paths, 1);
         
-        // Temporarily NOT deleting temp file for debugging
-        // remove(tmpPath.c_str());
+        remove(tmpPath.c_str());
         
         if (storeResult && storeResult->success_count > 0) {
             result->success = 1;
@@ -1532,7 +1532,16 @@ MediaUploadResult* dcmtk_upload_image(const char* server_host, int server_port, 
                 }
                 imgSource->setImageFile(image_path);
                 
-                I2DOutputPlugSC* outPlug = new I2DOutputPlugSC();
+                // Use VL Photographic for JPEG — proper SOP class for camera photos.
+                // SC (Secondary Capture) is rejected by strict DICOM servers like
+                // dicomserver.co.uk with 0xC000 "invalid instance".
+                I2DOutputPlug* outPlug;
+                if (isJpeg) {
+                    outPlug = new I2DOutputPlugVLP();
+                    sopClassUID = UID_VLPhotographicImageStorage;
+                } else {
+                    outPlug = new I2DOutputPlugSC();
+                }
                 
                 Image2Dcm converter;
                 DcmDataset* convertedDset = nullptr;
@@ -1553,11 +1562,6 @@ MediaUploadResult* dcmtk_upload_image(const char* server_host, int server_port, 
                 }
                 
                 outputTS = proposedTS;
-                // Keep native transfer syntax (e.g. JPEG Baseline) — no decompression.
-                // dcmtk_store_files offers JPEG/JPEGLS/J2K/RLE TS in negotiation,
-                // so the server will accept the encapsulated pixel data directly.
-                // Decompressing caused PhotometricInterpretation mismatch (YBR vs RGB)
-                // that strict servers like dicomserver.co.uk rejected with 0xC000.
                 
                 // CRITICAL: Transfer elements by MOVE (not copy!) to avoid
                 // DcmPixelData::operator= corruption that causes 0xC000.
@@ -1567,6 +1571,34 @@ MediaUploadResult* dcmtk_upload_image(const char* server_host, int server_port, 
                     if (elem) dataset->insert(elem, OFTrue);
                 }
                 delete convertedDset;
+                
+                // Decompress JPEG to uncompressed LE Explicit for maximum compatibility.
+                // Image2Dcm produces JPEG Baseline with YBR_FULL_422, but after
+                // decompression the raw pixels are RGB. We must update
+                // PhotometricInterpretation to match, or strict servers will reject/ignore.
+                {
+                    DJDecoderRegistration::registerCodecs();
+                    OFCondition decStatus = dataset->chooseRepresentation(EXS_LittleEndianExplicit, NULL);
+                    if (decStatus.good() && dataset->canWriteXfer(EXS_LittleEndianExplicit)) {
+                        outputTS = EXS_LittleEndianExplicit;
+                        // Fix PhotometricInterpretation: JPEG uses YBR_FULL_422 internally
+                        // but after decompression to raw pixels, it's RGB
+                        OFString photometric;
+                        dataset->findAndGetOFStringArray(DCM_PhotometricInterpretation, photometric);
+                        if (photometric == "YBR_FULL_422" || photometric == "YBR_FULL") {
+                            dataset->putAndInsertOFStringArray(DCM_PhotometricInterpretation, "RGB");
+                            DEBUG_LOG("Fixed PhotometricInterpretation: %s -> RGB", photometric.c_str());
+                        }
+                        // Remove compression-related tags that don't apply to uncompressed data
+                        dataset->findAndDeleteElement(DCM_LossyImageCompression, OFFalse);
+                        dataset->findAndDeleteElement(DCM_LossyImageCompressionRatio, OFFalse);
+                        dataset->findAndDeleteElement(DCM_LossyImageCompressionMethod, OFFalse);
+                        DEBUG_LOG("Decompressed JPEG to LE Explicit successfully");
+                    } else {
+                        DEBUG_LOG("Could not decompress JPEG (%s), keeping native TS", decStatus.text());
+                    }
+                    DJDecoderRegistration::cleanup();
+                }
                 
             } else {
                 // For other formats (PNG, HEIC, etc.), read raw bytes and create minimal SC
@@ -1630,7 +1662,12 @@ MediaUploadResult* dcmtk_upload_image(const char* server_host, int server_port, 
             dataset->putAndInsertOFStringArray(DCM_SeriesInstanceUID, seriesUID);
             dataset->putAndInsertOFStringArray(DCM_SeriesNumber, "1");
             dataset->putAndInsertOFStringArray(DCM_SeriesDescription, series_description ? series_description : "Uploaded Series");
-            dataset->putAndInsertOFStringArray(DCM_Modality, modality ? modality : "SC");
+            // Use appropriate default modality based on SOP class
+            const char* defaultModality = "SC";
+            if (strcmp(sopClassUID, UID_VLPhotographicImageStorage) == 0) {
+                defaultModality = "XC"; // External-camera Photography
+            }
+            dataset->putAndInsertOFStringArray(DCM_Modality, (modality && strlen(modality) > 0) ? modality : defaultModality);
             
             dataset->putAndInsertOFStringArray(DCM_SOPInstanceUID, sopUID);
             dataset->putAndInsertOFStringArray(DCM_SOPClassUID, sopClassUID);
@@ -1639,10 +1676,19 @@ MediaUploadResult* dcmtk_upload_image(const char* server_host, int server_port, 
             dataset->putAndInsertOFStringArray(DCM_InstanceNumber, instNumStr);
             dataset->putAndInsertOFStringArray(DCM_ContentDate, uploadDate.c_str());
             dataset->putAndInsertOFStringArray(DCM_ContentTime, uploadTime.c_str());
-            dataset->putAndInsertOFStringArray(DCM_ConversionType, "WSD");
+            // ConversionType is SC-specific, not applicable to VL Photographic
+            if (strcmp(sopClassUID, UID_VLPhotographicImageStorage) != 0) {
+                dataset->putAndInsertOFStringArray(DCM_ConversionType, "WSD");
+            }
             dataset->putAndInsertOFStringArray(DCM_Manufacturer, "MedView");
             dataset->putAndInsertOFStringArray(DCM_ImageType, "DERIVED\\SECONDARY");
             dataset->putAndInsertOFStringArray(DCM_PatientOrientation, "");
+            // VL Photographic IOD required attributes
+            if (strcmp(sopClassUID, UID_VLPhotographicImageStorage) == 0) {
+                std::string acqDT = std::string(uploadDate.c_str()) + std::string(uploadTime.c_str());
+                dataset->putAndInsertOFStringArray(DCM_AcquisitionDateTime, acqDT.c_str());
+                dataset->putAndInsertOFStringArray(DCM_BurnedInAnnotation, "NO");
+            }
         }
         
         // Add comments
@@ -1681,53 +1727,11 @@ MediaUploadResult* dcmtk_upload_image(const char* server_host, int server_port, 
         }
         DEBUG_LOG("Saved temp DICOM for upload: %s (TS: %s)", tmpPath.c_str(), DcmXfer(writeTS).getXferName());
         
-        // Dump key DICOM tags for diagnostics
-        {
-            OFString v;
-            DcmDataset* dd = saveRef.getDataset();
-            dd->findAndGetOFStringArray(DCM_PatientID, v); DEBUG_LOG("  PatientID: %s", v.c_str());
-            dd->findAndGetOFStringArray(DCM_PatientName, v); DEBUG_LOG("  PatientName: %s", v.c_str());
-            dd->findAndGetOFStringArray(DCM_StudyInstanceUID, v); DEBUG_LOG("  StudyInstanceUID: %s", v.c_str());
-            dd->findAndGetOFStringArray(DCM_SeriesInstanceUID, v); DEBUG_LOG("  SeriesInstanceUID: %s", v.c_str());
-            dd->findAndGetOFStringArray(DCM_SOPInstanceUID, v); DEBUG_LOG("  SOPInstanceUID: %s", v.c_str());
-            dd->findAndGetOFStringArray(DCM_SOPClassUID, v); DEBUG_LOG("  SOPClassUID: %s", v.c_str());
-            dd->findAndGetOFStringArray(DCM_Modality, v); DEBUG_LOG("  Modality: %s", v.c_str());
-            dd->findAndGetOFStringArray(DCM_StudyDate, v); DEBUG_LOG("  StudyDate: %s", v.c_str());
-            dd->findAndGetOFStringArray(DCM_StudyDescription, v); DEBUG_LOG("  StudyDescription: %s", v.c_str());
-            dd->findAndGetOFStringArray(DCM_SeriesDescription, v); DEBUG_LOG("  SeriesDescription: %s", v.c_str());
-            dd->findAndGetOFStringArray(DCM_SeriesNumber, v); DEBUG_LOG("  SeriesNumber: %s", v.c_str());
-            dd->findAndGetOFStringArray(DCM_InstanceNumber, v); DEBUG_LOG("  InstanceNumber: %s", v.c_str());
-            dd->findAndGetOFStringArray(DCM_ConversionType, v); DEBUG_LOG("  ConversionType: %s", v.c_str());
-            dd->findAndGetOFStringArray(DCM_PhotometricInterpretation, v); DEBUG_LOG("  PhotometricInterpretation: %s", v.c_str());
-            Uint16 rows=0, cols=0, bitsAlloc=0, bitsStored=0;
-            dd->findAndGetUint16(DCM_Rows, rows);
-            dd->findAndGetUint16(DCM_Columns, cols);
-            dd->findAndGetUint16(DCM_BitsAllocated, bitsAlloc);
-            dd->findAndGetUint16(DCM_BitsStored, bitsStored);
-            DEBUG_LOG("  Rows=%u Cols=%u BitsAlloc=%u BitsStored=%u", rows, cols, bitsAlloc, bitsStored);
-            // Check pixel data presence
-            DcmElement* pixElem = NULL;
-            if (dd->findAndGetElement(DCM_PixelData, pixElem).good() && pixElem) {
-                DEBUG_LOG("  PixelData present, length=%lu", pixElem->getLength());
-            } else {
-                DEBUG_LOG("  WARNING: No PixelData found!");
-            }
-            dd->findAndGetOFStringArray(DCM_SpecificCharacterSet, v); DEBUG_LOG("  SpecificCharacterSet: %s", v.c_str());
-            // Meta header
-            DcmMetaInfo* mi = saveRef.getMetaInfo();
-            mi->findAndGetOFStringArray(DCM_MediaStorageSOPClassUID, v); DEBUG_LOG("  Meta SOPClassUID: %s", v.c_str());
-            mi->findAndGetOFStringArray(DCM_MediaStorageSOPInstanceUID, v); DEBUG_LOG("  Meta SOPInstanceUID: %s", v.c_str());
-        }
-        
-        // Keep temp file for inspection (remove this line after debugging)
-        DEBUG_LOG("KEEPING temp DICOM file for inspection: %s", tmpPath.c_str());
-        
         // Use dcmtk_store_files — the proven, battle-tested C-STORE path
         const char* paths[1] = { tmpPath.c_str() };
         StoreResult* storeResult = dcmtk_store_files(server_host, server_port, ae_title, called_ae_title, paths, 1);
         
-        // Temporarily NOT deleting temp file for debugging
-        // remove(tmpPath.c_str());
+        remove(tmpPath.c_str());
         
         if (storeResult && storeResult->success_count > 0) {
             result->success = 1;
@@ -3271,12 +3275,30 @@ StoreResult* dcmtk_store_files(const char* server_host, int server_port,
         return result;
     }
 
+    // Subclass to capture per-instance DIMSE response status
+    class TrackingStorageSCU : public DcmStorageSCU {
+    public:
+        int successCount = 0;
+        int failCount = 0;
+        Uint16 lastFailStatus = 0;
+    protected:
+        virtual void notifySOPInstanceSent(const TransferEntry& entry) {
+            if (entry.RequestSent) {
+                Uint16 st = entry.ResponseStatusCode;
+                if (st == 0x0000 || (st & 0xFF00) == 0xB000) {
+                    successCount++;
+                    DEBUG_LOG("  Instance sent OK: status 0x%04X", st);
+                } else {
+                    failCount++;
+                    lastFailStatus = st;
+                    DEBUG_LOG("  Instance REJECTED: status 0x%04X", st);
+                }
+            }
+        }
+    };
+
     try {
-        // Use DcmStorageSCU — the official DCMTK high-level C-STORE class.
-        // It handles: reading files, proposing presentation contexts per file's
-        // SOP class + transfer syntax, negotiating, decompressing if needed,
-        // and sending correctly on the matching presentation context.
-        DcmStorageSCU storageSCU;
+        TrackingStorageSCU storageSCU;
         storageSCU.setAETitle(ae_title);
         storageSCU.setPeerAETitle(called_ae_title);
         storageSCU.setPeerHostName(server_host);
@@ -3284,7 +3306,6 @@ StoreResult* dcmtk_store_files(const char* server_host, int server_port,
         storageSCU.setMaxReceivePDULength(16384);
         storageSCU.setACSETimeout(30);
         storageSCU.setDIMSETimeout(60);
-        // Allow decompressing lossless if server doesn't accept compressed TS
         storageSCU.setDecompressionMode(DcmStorageSCU::DM_lossyAndLossless);
         storageSCU.setHaltOnUnsuccessfulStoreMode(OFFalse);
 
@@ -3311,7 +3332,6 @@ StoreResult* dcmtk_store_files(const char* server_host, int server_port,
             return result;
         }
 
-        // Let DcmStorageSCU propose the right presentation contexts
         OFCondition cond = storageSCU.addPresentationContexts();
         if (cond.bad()) {
             result->error = 1;
@@ -3350,38 +3370,29 @@ StoreResult* dcmtk_store_files(const char* server_host, int server_port,
             return result;
         }
 
-        // Send all SOP instances
         cond = storageSCU.sendSOPInstances();
-        if (cond.bad()) {
-            DEBUG_LOG("sendSOPInstances returned: %s", cond.text());
-        }
 
-        // Get status summary
         OFString summary;
         storageSCU.getStatusSummary(summary);
         DEBUG_LOG("DcmStorageSCU summary:\n%s", summary.c_str());
 
         storageSCU.releaseAssociation();
 
-        // Count successes/failures from the summary
-        // DcmStorageSCU tracks this internally but only exposes it through
-        // getStatusSummary(). We count based on total - fail_count (files that
-        // couldn't be added). The rest were attempted; if sendSOPInstances
-        // succeeded, they were sent.
-        int attempted = file_count - result->fail_count;
-        if (cond.good()) {
-            result->success_count = attempted;
-        } else {
-            // Some may have succeeded before the error
-            result->fail_count = file_count;
-            result->error_message = strdup(("Send failed: " + std::string(cond.text())).c_str());
+        // Use the ACTUAL per-instance status counts
+        result->success_count = storageSCU.successCount;
+        result->fail_count += storageSCU.failCount;
+        if (storageSCU.failCount > 0 && result->error_message == nullptr) {
+            char msg[128];
+            snprintf(msg, sizeof(msg), "Server rejected %d instance(s) with status 0x%04X",
+                     storageSCU.failCount, storageSCU.lastFailStatus);
+            result->error_message = strdup(msg);
         }
 
         DJDecoderRegistration::cleanup();
         DJLSDecoderRegistration::cleanup();
         DcmRLEDecoderRegistration::cleanup();
 
-        DEBUG_LOG("Store complete: %d/%d succeeded", result->success_count, file_count);
+        DEBUG_LOG("Store complete: %d succeeded, %d failed", result->success_count, result->fail_count);
 
     } catch (const std::exception& e) {
         result->error = 1;
