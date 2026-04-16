@@ -104,6 +104,8 @@ extern "C" {
         int success;
         char* error_message;
         char* generated_patient_id;
+        int rsp_status_code;
+        char* warning_message;
     } PatientCreationResult;
     
     typedef struct {
@@ -112,10 +114,11 @@ extern "C" {
         char* study_instance_uid;
         char* series_instance_uid;
         char* sop_instance_uid;
+        int rsp_status_code;
     } MediaUploadResult;
     
     int dcmtk_test_server_connection(const char* server_host, int server_port, const char* ae_title, const char* called_ae_title);
-    DicomQueryResult* dcmtk_query_patients(const char* server_host, int server_port, const char* ae_title, const char* called_ae_title);
+    DicomQueryResult* dcmtk_query_patients(const char* server_host, int server_port, const char* ae_title, const char* called_ae_title, const char* patient_name_filter);
     DicomStudyQueryResult* dcmtk_query_studies_for_patient(const char* server_host, int server_port, const char* ae_title, const char* called_ae_title, const char* patient_id);
     DicomSeriesQueryResult* dcmtk_query_series_for_study(const char* server_host, int server_port, const char* ae_title, const char* called_ae_title, const char* study_instance_uid);
     PatientCreationResult* dcmtk_create_patient(const char* server_host, int server_port, const char* ae_title, const char* called_ae_title, PatientInfo* patient_info);
@@ -287,6 +290,7 @@ extern "C" {
     NSNumber* serverPort = call.arguments[@"serverPort"];
     NSString* aeTitle = call.arguments[@"aeTitle"];
     NSString* calledAeTitle = call.arguments[@"calledAeTitle"];
+    NSString* patientNameFilter = call.arguments[@"patientNameFilter"];
     
     if (serverHost == nil || serverPort == nil || aeTitle == nil || calledAeTitle == nil) {
       result([FlutterError errorWithCode:@"INVALID_ARGUMENT"
@@ -299,8 +303,9 @@ extern "C" {
     int cServerPort = [serverPort intValue];
     const char* cAeTitle = [aeTitle UTF8String];
     const char* cCalledAeTitle = [calledAeTitle UTF8String];
+    const char* cFilter = patientNameFilter ? [patientNameFilter UTF8String] : NULL;
     
-    DicomQueryResult* queryResult = dcmtk_query_patients(cServerHost, cServerPort, cAeTitle, cCalledAeTitle);
+    DicomQueryResult* queryResult = dcmtk_query_patients(cServerHost, cServerPort, cAeTitle, cCalledAeTitle, cFilter);
     
     if (queryResult->error) {
       NSString* errorMsg = queryResult->error_message ? 
@@ -544,7 +549,9 @@ extern "C" {
     
     NSDictionary* resultDict = @{
       @"success": @(creationResult->success),
-      @"patientId": creationResult->generated_patient_id ? [NSString stringWithUTF8String:creationResult->generated_patient_id] : @""
+      @"patientId": creationResult->generated_patient_id ? [NSString stringWithUTF8String:creationResult->generated_patient_id] : @"",
+      @"rspStatusCode": @(creationResult->rsp_status_code),
+      @"warning": creationResult->warning_message ? [NSString stringWithUTF8String:creationResult->warning_message] : @""
     };
     
     dcmtk_free_patient_creation_result(creationResult);
@@ -635,7 +642,8 @@ extern "C" {
           @"success": @(uploadResult->success),
           @"studyInstanceUID": uploadResult->study_instance_uid ? [NSString stringWithUTF8String:uploadResult->study_instance_uid] : @"",
           @"seriesInstanceUID": uploadResult->series_instance_uid ? [NSString stringWithUTF8String:uploadResult->series_instance_uid] : @"",
-          @"sopInstanceUID": uploadResult->sop_instance_uid ? [NSString stringWithUTF8String:uploadResult->sop_instance_uid] : @""
+          @"sopInstanceUID": uploadResult->sop_instance_uid ? [NSString stringWithUTF8String:uploadResult->sop_instance_uid] : @"",
+          @"rspStatusCode": @(uploadResult->rsp_status_code)
         };
     
         dcmtk_free_media_upload_result(uploadResult);

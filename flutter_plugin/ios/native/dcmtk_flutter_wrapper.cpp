@@ -10,6 +10,7 @@
 #include <dcmtk/dcmimgle/dcmimage.h>
 #include <dcmtk/dcmimage/diregist.h>
 #include <dcmtk/dcmnet/scu.h>
+#include <dcmtk/dcmnet/dstorscu.h>
 #include <dcmtk/dcmnet/diutil.h>
 #include <dcmtk/dcmdata/libi2d/i2d.h>
 #include <dcmtk/dcmdata/libi2d/i2djpgs.h>
@@ -840,8 +841,8 @@ int dcmtk_test_server_connection(const char* server_host, int server_port, const
     }
 }
 
-DicomQueryResult* dcmtk_query_patients(const char* server_host, int server_port, const char* ae_title, const char* called_ae_title) {
-    DEBUG_LOG("Querying patients from %s:%d (AET: %s -> %s)", server_host, server_port, ae_title, called_ae_title);
+DicomQueryResult* dcmtk_query_patients(const char* server_host, int server_port, const char* ae_title, const char* called_ae_title, const char* patient_name_filter) {
+    DEBUG_LOG("Querying patients from %s:%d (AET: %s -> %s, filter: '%s')", server_host, server_port, ae_title, called_ae_title, patient_name_filter ? patient_name_filter : "");
     
     DicomQueryResult* result = (DicomQueryResult*)malloc(sizeof(DicomQueryResult));
     result->patients = nullptr;
@@ -928,8 +929,14 @@ DicomQueryResult* dcmtk_query_patients(const char* server_host, int server_port,
         // Query at PATIENT level to get patient records
         DcmDataset query;
         query.putAndInsertOFStringArray(DCM_QueryRetrieveLevel, "PATIENT");
-        query.putAndInsertOFStringArray(DCM_PatientID, "");           // Return PatientID
-        query.putAndInsertOFStringArray(DCM_PatientName, "");         // Return PatientName  
+        query.putAndInsertOFStringArray(DCM_PatientID, "*");           // Wildcard: return all
+        // Apply server-side name filter if provided, otherwise wildcard
+        if (patient_name_filter && strlen(patient_name_filter) > 0) {
+            std::string filter = std::string("*") + patient_name_filter + "*";
+            query.putAndInsertOFStringArray(DCM_PatientName, filter.c_str());
+        } else {
+            query.putAndInsertOFStringArray(DCM_PatientName, "*");     // Wildcard: return all
+        }
         query.putAndInsertOFStringArray(DCM_PatientBirthDate, "");    // Return Birth Date
         query.putAndInsertOFStringArray(DCM_PatientSex, "");          // Return Sex
         query.putAndInsertOFStringArray(DCM_NumberOfPatientRelatedStudies, ""); // Return study count
@@ -1250,6 +1257,8 @@ PatientCreationResult* dcmtk_create_patient(const char* server_host, int server_
     result->success = 0;
     result->error_message = nullptr;
     result->generated_patient_id = nullptr;
+    result->rsp_status_code = -1;
+    result->warning_message = nullptr;
     
     // Input validation
     if (!server_host || !ae_title || !called_ae_title || !patient_info) {
@@ -1284,7 +1293,10 @@ PatientCreationResult* dcmtk_create_patient(const char* server_host, int server_
         dcmGenerateUniqueIdentifier(sopUID, SITE_INSTANCE_UID_ROOT);
         
         DEBUG_LOG("Step 3: Populating DICOM dataset with patient info");
-        // Patient level attributes
+        // Character set (Type 1C - required for non-ASCII)
+        dataset->putAndInsertOFStringArray(DCM_SpecificCharacterSet, "ISO_IR 100");
+        
+        // Patient level attributes (Type 2 - required, may be empty)
         dataset->putAndInsertOFStringArray(DCM_PatientID, patient_info->patient_id ? patient_info->patient_id : "");
         dataset->putAndInsertOFStringArray(DCM_PatientName, patient_info->patient_name ? patient_info->patient_name : "");
         dataset->putAndInsertOFStringArray(DCM_PatientBirthDate, patient_info->patient_birth_date ? patient_info->patient_birth_date : "");
@@ -1299,93 +1311,98 @@ PatientCreationResult* dcmtk_create_patient(const char* server_host, int server_
         dataset->putAndInsertOFStringArray(DCM_StudyTime, currentTime.c_str());
         dataset->putAndInsertOFStringArray(DCM_StudyDescription, "Patient Registration");
         dataset->putAndInsertOFStringArray(DCM_AccessionNumber, "");
+        dataset->putAndInsertOFStringArray(DCM_StudyID, "1");
+        dataset->putAndInsertOFStringArray(DCM_ReferringPhysicianName, "");
         
         // Series level attributes  
         dataset->putAndInsertOFStringArray(DCM_SeriesInstanceUID, seriesUID);
         dataset->putAndInsertOFStringArray(DCM_SeriesNumber, "1");
         dataset->putAndInsertOFStringArray(DCM_SeriesDescription, "Patient Registration");
         dataset->putAndInsertOFStringArray(DCM_Modality, "OT"); // Other
+        dataset->putAndInsertOFStringArray(DCM_Laterality, "");
         
         // Instance level attributes
         dataset->putAndInsertOFStringArray(DCM_SOPInstanceUID, sopUID);
         dataset->putAndInsertOFStringArray(DCM_SOPClassUID, UID_SecondaryCaptureImageStorage);
         dataset->putAndInsertOFStringArray(DCM_InstanceNumber, "1");
+        dataset->putAndInsertOFStringArray(DCM_InstanceCreationDate, currentDate.c_str());
+        dataset->putAndInsertOFStringArray(DCM_InstanceCreationTime, currentTime.c_str());
+        dataset->putAndInsertOFStringArray(DCM_ContentDate, currentDate.c_str());
+        dataset->putAndInsertOFStringArray(DCM_ContentTime, currentTime.c_str());
         
-        // Create a minimal 1x1 pixel image for registration
+        // SC Equipment Module (required for Secondary Capture)
+        dataset->putAndInsertOFStringArray(DCM_ConversionType, "WSD"); // Workstation
+        dataset->putAndInsertOFStringArray(DCM_Manufacturer, "MedView");
+        
+        // General Image Module (Type 2)
+        dataset->putAndInsertOFStringArray(DCM_ImageType, "DERIVED\\SECONDARY");
+        dataset->putAndInsertOFStringArray(DCM_PatientOrientation, "");
+        
+        // Create a minimal 8x8 pixel image for registration (some servers reject 1x1)
         dataset->putAndInsertUint16(DCM_SamplesPerPixel, (Uint16)1);
         dataset->putAndInsertOFStringArray(DCM_PhotometricInterpretation, "MONOCHROME2");
-        dataset->putAndInsertUint16(DCM_Rows, (Uint16)1);
-        dataset->putAndInsertUint16(DCM_Columns, (Uint16)1);
+        dataset->putAndInsertUint16(DCM_Rows, (Uint16)8);
+        dataset->putAndInsertUint16(DCM_Columns, (Uint16)8);
         dataset->putAndInsertUint16(DCM_BitsAllocated, (Uint16)8);
         dataset->putAndInsertUint16(DCM_BitsStored, (Uint16)8);
         dataset->putAndInsertUint16(DCM_HighBit, (Uint16)7);
         dataset->putAndInsertUint16(DCM_PixelRepresentation, (Uint16)0);
         
-        // Add minimal pixel data (1 black pixel)
-        Uint8 pixelData = 0;
-        dataset->putAndInsertUint8Array(DCM_PixelData, &pixelData, (Uint32)1);
+        // 8x8 = 64 bytes, padded to even length (already even)
+        Uint8 pixelData[64];
+        memset(pixelData, 0, sizeof(pixelData));
+        dataset->putAndInsertUint8Array(DCM_PixelData, pixelData, (Uint32)64);
         
-        // Now store this to the DICOM server via C-STORE
-        DcmSCU scu;
-        scu.setAETitle(ae_title);
-        scu.setPeerAETitle(called_ae_title);
-        scu.setPeerHostName(server_host);
-        scu.setPeerPort(server_port);
+        // Save to a temporary DICOM file with proper meta header.
+        // Sending by file path is more reliable than in-memory dataset
+        // because DCMTK writes a correct file meta header with Transfer Syntax UID.
+        E_TransferSyntax writeTS = EXS_LittleEndianExplicit;
         
-        // Add presentation contexts for storage
-        OFList<OFString> transferSyntaxes;
-        transferSyntaxes.push_back(UID_LittleEndianImplicitTransferSyntax);
-        transferSyntaxes.push_back(UID_LittleEndianExplicitTransferSyntax);
-        transferSyntaxes.push_back(UID_BigEndianExplicitTransferSyntax);
+        // Build temp file path
+        std::string tmpDir;
+        const char* envTmp = getenv("TMPDIR");
+        if (envTmp && strlen(envTmp) > 0) {
+            tmpDir = envTmp;
+        } else {
+            tmpDir = "/tmp";
+        }
+        std::string tmpPath = tmpDir + "/medview_create_patient_" + std::string(sopUID) + ".dcm";
         
-        scu.addPresentationContext(UID_SecondaryCaptureImageStorage, transferSyntaxes);
+        // Write the file meta information
+        fileFormat.getMetaInfo()->putAndInsertOFStringArray(DCM_MediaStorageSOPClassUID, UID_SecondaryCaptureImageStorage);
+        fileFormat.getMetaInfo()->putAndInsertOFStringArray(DCM_MediaStorageSOPInstanceUID, sopUID);
         
-        DEBUG_LOG("Step 4: Initializing network connection");
-        // Initialize and negotiate
-        OFCondition status = scu.initNetwork();
-        if (status.bad()) {
-            result->error_message = strdup(("Network initialization failed: " + std::string(status.text())).c_str());
-            DEBUG_LOG("Network init failed for patient creation: %s", status.text());
+        OFCondition saveStatus = fileFormat.saveFile(tmpPath.c_str(), writeTS);
+        if (saveStatus.bad()) {
+            result->error_message = strdup(("Failed to save temp DICOM file: " + std::string(saveStatus.text())).c_str());
+            DEBUG_LOG("Failed to save temp DICOM: %s", saveStatus.text());
             return result;
         }
-        if (!maybe_apply_tls(scu)) {
-            result->error_message = strdup("TLS configuration failed");
-            return result;
-        }
+        DEBUG_LOG("Saved temp DICOM file: %s", tmpPath.c_str());
         
-        DEBUG_LOG("Step 5: Negotiating association");
-        status = scu.negotiateAssociation();
-        if (status.bad()) {
-            result->error_message = strdup(("Association failed: " + std::string(status.text())).c_str());
-            DEBUG_LOG("Association failed for patient creation: %s", status.text());
-            return result;
-        }
+        // Use dcmtk_store_files — the proven, battle-tested C-STORE path
+        // that handles all TS negotiation, presentation contexts, etc. correctly.
+        const char* paths[1] = { tmpPath.c_str() };
+        StoreResult* storeResult = dcmtk_store_files(server_host, server_port, ae_title, called_ae_title, paths, 1);
         
-        DEBUG_LOG("Step 6: Finding presentation context");
-        // Send C-STORE
-        T_ASC_PresentationContextID presID = scu.findPresentationContextID(UID_SecondaryCaptureImageStorage, "");
-        if (presID == 0) {
-            result->error_message = strdup("No acceptable presentation context for storage");
-            DEBUG_LOG("No acceptable presentation context found");
-            scu.releaseAssociation();
-            return result;
-        }
+        // Temporarily NOT deleting temp file for debugging
+        // remove(tmpPath.c_str());
         
-        DEBUG_LOG("Step 7: Sending C-STORE request with presentation context ID: %d", presID);
-        Uint16 rspStatusCode;
-        status = scu.sendSTORERequest(presID, "", dataset, rspStatusCode);
-        
-        if (status.good()) {
-            DEBUG_LOG("Step 8: C-STORE successful, response status code: %d", rspStatusCode);
+        if (storeResult && storeResult->success_count > 0) {
             result->success = 1;
             result->generated_patient_id = strdup(patient_info->patient_id ? patient_info->patient_id : "");
-            DEBUG_LOG("Patient created successfully: %s", result->generated_patient_id);
+            result->rsp_status_code = 0;
+            DEBUG_LOG("Patient created successfully via dcmtk_store_files");
         } else {
-            result->error_message = strdup(("C-STORE failed: " + std::string(status.text())).c_str());
-            DEBUG_LOG("C-STORE failed for patient creation: %s", status.text());
+            std::string errMsg = "C-STORE failed";
+            if (storeResult && storeResult->error_message) {
+                errMsg = storeResult->error_message;
+            }
+            result->error_message = strdup(errMsg.c_str());
+            result->rsp_status_code = -1;
+            DEBUG_LOG("Patient creation C-STORE failed: %s", errMsg.c_str());
         }
-        
-        scu.releaseAssociation();
+        if (storeResult) dcmtk_free_store_result(storeResult);
         
     } catch (const std::exception& e) {
         result->error_message = strdup(("Exception during patient creation: " + std::string(e.what())).c_str());
@@ -1399,6 +1416,7 @@ void dcmtk_free_patient_creation_result(PatientCreationResult* result) {
     if (result) {
         if (result->error_message) free(result->error_message);
         if (result->generated_patient_id) free(result->generated_patient_id);
+        if (result->warning_message) free(result->warning_message);
         free(result);
     }
 }
@@ -1415,6 +1433,7 @@ MediaUploadResult* dcmtk_upload_image(const char* server_host, int server_port, 
     result->study_instance_uid = nullptr;
     result->series_instance_uid = nullptr;
     result->sop_instance_uid = nullptr;
+    result->rsp_status_code = -1;
     
     if (!server_host || !ae_title || !called_ae_title || !patient_id || !image_path) {
         result->error_message = strdup("Invalid input parameters for image upload");
@@ -1534,10 +1553,19 @@ MediaUploadResult* dcmtk_upload_image(const char* server_host, int server_port, 
                 }
                 
                 outputTS = proposedTS;
+                // Keep native transfer syntax (e.g. JPEG Baseline) — no decompression.
+                // dcmtk_store_files offers JPEG/JPEGLS/J2K/RLE TS in negotiation,
+                // so the server will accept the encapsulated pixel data directly.
+                // Decompressing caused PhotometricInterpretation mismatch (YBR vs RGB)
+                // that strict servers like dicomserver.co.uk rejected with 0xC000.
                 
-                // Copy converted dataset contents into our file format
+                // CRITICAL: Transfer elements by MOVE (not copy!) to avoid
+                // DcmPixelData::operator= corruption that causes 0xC000.
                 dataset = fileFormat.getDataset();
-                *dataset = *convertedDset;
+                while (convertedDset->card() > 0) {
+                    DcmElement* elem = OFstatic_cast(DcmElement*, convertedDset->remove(OFstatic_cast(unsigned long, 0)));
+                    if (elem) dataset->insert(elem, OFTrue);
+                }
                 delete convertedDset;
                 
             } else {
@@ -1582,6 +1610,7 @@ MediaUploadResult* dcmtk_upload_image(const char* server_host, int server_port, 
             }
             
             // Set patient/study/series/instance attributes
+            dataset->putAndInsertOFStringArray(DCM_SpecificCharacterSet, "ISO_IR 100");
             dataset->putAndInsertOFStringArray(DCM_PatientID, patient_id);
             dataset->putAndInsertOFStringArray(DCM_PatientName, patient_id);
             dataset->putAndInsertOFStringArray(DCM_PatientBirthDate, "");
@@ -1595,6 +1624,8 @@ MediaUploadResult* dcmtk_upload_image(const char* server_host, int server_port, 
             dataset->putAndInsertOFStringArray(DCM_StudyTime, uploadTime.c_str());
             dataset->putAndInsertOFStringArray(DCM_StudyDescription, study_description ? study_description : "Uploaded Image");
             dataset->putAndInsertOFStringArray(DCM_AccessionNumber, "");
+            dataset->putAndInsertOFStringArray(DCM_StudyID, "1");
+            dataset->putAndInsertOFStringArray(DCM_ReferringPhysicianName, "");
             
             dataset->putAndInsertOFStringArray(DCM_SeriesInstanceUID, seriesUID);
             dataset->putAndInsertOFStringArray(DCM_SeriesNumber, "1");
@@ -1606,6 +1637,12 @@ MediaUploadResult* dcmtk_upload_image(const char* server_host, int server_port, 
             char instNumStr[16];
             snprintf(instNumStr, sizeof(instNumStr), "%d", instance_number > 0 ? instance_number : 1);
             dataset->putAndInsertOFStringArray(DCM_InstanceNumber, instNumStr);
+            dataset->putAndInsertOFStringArray(DCM_ContentDate, uploadDate.c_str());
+            dataset->putAndInsertOFStringArray(DCM_ContentTime, uploadTime.c_str());
+            dataset->putAndInsertOFStringArray(DCM_ConversionType, "WSD");
+            dataset->putAndInsertOFStringArray(DCM_Manufacturer, "MedView");
+            dataset->putAndInsertOFStringArray(DCM_ImageType, "DERIVED\\SECONDARY");
+            dataset->putAndInsertOFStringArray(DCM_PatientOrientation, "");
         }
         
         // Add comments
@@ -1613,108 +1650,103 @@ MediaUploadResult* dcmtk_upload_image(const char* server_host, int server_port, 
             dataset->putAndInsertOFStringArray(DCM_ImageComments, image_comments);
         }
         
-        // Get the dataset to send
-        DcmDataset* sendDataset = isDicomFile ? existingDcm.getDataset() : dataset;
-        
-        // C-STORE to server
-        DcmSCU scu;
-        scu.setAETitle(ae_title);
-        scu.setPeerAETitle(called_ae_title);
-        scu.setPeerHostName(server_host);
-        scu.setPeerPort(server_port);
-        
-        // Offer the dataset's native transfer syntax FIRST so the server
-        // accepts the data as-is (no decompression needed).
-        // Then offer uncompressed as fallback.
-        OFList<OFString> transferSyntaxes;
-        
-        // Map the output TS to its UID string
-        DcmXfer outputXfer(outputTS);
-        const char* outputTsUid = outputXfer.getXferID();
-        if (outputTsUid && strlen(outputTsUid) > 0 &&
-            outputTS != EXS_LittleEndianImplicit && outputTS != EXS_LittleEndianExplicit) {
-            transferSyntaxes.push_back(outputTsUid);
-            DEBUG_LOG("Offering native TS first: %s", outputTsUid);
+        // Save to a temporary DICOM file with proper file meta header,
+        // then reload and send. This avoids DcmDataset::operator= corruption
+        // while ensuring the dataset has a clean internal state.
+        std::string tmpDir;
+        const char* envTmp = getenv("TMPDIR");
+        if (envTmp && strlen(envTmp) > 0) {
+            tmpDir = envTmp;
+        } else {
+            tmpDir = "/tmp";
         }
-        transferSyntaxes.push_back(UID_LittleEndianExplicitTransferSyntax);
-        transferSyntaxes.push_back(UID_LittleEndianImplicitTransferSyntax);
+        std::string tmpPath = tmpDir + "/medview_upload_" + std::string(sopUID) + ".dcm";
         
-        scu.addPresentationContext(sopClassUID, transferSyntaxes);
+        // Use the native transfer syntax for ALL cases:
+        // - DICOM files: preserve original TS
+        // - JPEG via Image2Dcm: JPEG Baseline (encapsulated)
+        // - Other formats: LE Explicit (default from initialization)
+        E_TransferSyntax writeTS = outputTS;
         
-        OFCondition status = scu.initNetwork();
-        if (status.bad()) {
-            result->error_message = strdup(("Network initialization failed: " + std::string(status.text())).c_str());
+        // Save directly from the original file format — NO dataset copy needed.
+        // For DICOM files, existingDcm has the data. For non-DICOM, fileFormat has it.
+        DcmFileFormat& saveRef = isDicomFile ? existingDcm : fileFormat;
+        saveRef.getMetaInfo()->putAndInsertOFStringArray(DCM_MediaStorageSOPClassUID, sopClassUID);
+        saveRef.getMetaInfo()->putAndInsertOFStringArray(DCM_MediaStorageSOPInstanceUID, sopUID);
+        
+        OFCondition saveStatus = saveRef.saveFile(tmpPath.c_str(), writeTS);
+        if (saveStatus.bad()) {
+            result->error_message = strdup(("Failed to save temp DICOM: " + std::string(saveStatus.text())).c_str());
             return result;
         }
-        if (!maybe_apply_tls(scu)) {
-            result->error_message = strdup("TLS configuration failed");
-            return result;
-        }
+        DEBUG_LOG("Saved temp DICOM for upload: %s (TS: %s)", tmpPath.c_str(), DcmXfer(writeTS).getXferName());
         
-        status = scu.negotiateAssociation();
-        if (status.bad()) {
-            result->error_message = strdup(("Association failed: " + std::string(status.text())).c_str());
-            return result;
-        }
-        
-        // Try to find a presentation context matching the dataset's native TS first
-        T_ASC_PresentationContextID presID = 0;
-        if (outputTsUid && strlen(outputTsUid) > 0) {
-            presID = scu.findPresentationContextID(sopClassUID, outputTsUid);
-            if (presID > 0) {
-                DEBUG_LOG("Using native TS presentation context: %d", (int)presID);
+        // Dump key DICOM tags for diagnostics
+        {
+            OFString v;
+            DcmDataset* dd = saveRef.getDataset();
+            dd->findAndGetOFStringArray(DCM_PatientID, v); DEBUG_LOG("  PatientID: %s", v.c_str());
+            dd->findAndGetOFStringArray(DCM_PatientName, v); DEBUG_LOG("  PatientName: %s", v.c_str());
+            dd->findAndGetOFStringArray(DCM_StudyInstanceUID, v); DEBUG_LOG("  StudyInstanceUID: %s", v.c_str());
+            dd->findAndGetOFStringArray(DCM_SeriesInstanceUID, v); DEBUG_LOG("  SeriesInstanceUID: %s", v.c_str());
+            dd->findAndGetOFStringArray(DCM_SOPInstanceUID, v); DEBUG_LOG("  SOPInstanceUID: %s", v.c_str());
+            dd->findAndGetOFStringArray(DCM_SOPClassUID, v); DEBUG_LOG("  SOPClassUID: %s", v.c_str());
+            dd->findAndGetOFStringArray(DCM_Modality, v); DEBUG_LOG("  Modality: %s", v.c_str());
+            dd->findAndGetOFStringArray(DCM_StudyDate, v); DEBUG_LOG("  StudyDate: %s", v.c_str());
+            dd->findAndGetOFStringArray(DCM_StudyDescription, v); DEBUG_LOG("  StudyDescription: %s", v.c_str());
+            dd->findAndGetOFStringArray(DCM_SeriesDescription, v); DEBUG_LOG("  SeriesDescription: %s", v.c_str());
+            dd->findAndGetOFStringArray(DCM_SeriesNumber, v); DEBUG_LOG("  SeriesNumber: %s", v.c_str());
+            dd->findAndGetOFStringArray(DCM_InstanceNumber, v); DEBUG_LOG("  InstanceNumber: %s", v.c_str());
+            dd->findAndGetOFStringArray(DCM_ConversionType, v); DEBUG_LOG("  ConversionType: %s", v.c_str());
+            dd->findAndGetOFStringArray(DCM_PhotometricInterpretation, v); DEBUG_LOG("  PhotometricInterpretation: %s", v.c_str());
+            Uint16 rows=0, cols=0, bitsAlloc=0, bitsStored=0;
+            dd->findAndGetUint16(DCM_Rows, rows);
+            dd->findAndGetUint16(DCM_Columns, cols);
+            dd->findAndGetUint16(DCM_BitsAllocated, bitsAlloc);
+            dd->findAndGetUint16(DCM_BitsStored, bitsStored);
+            DEBUG_LOG("  Rows=%u Cols=%u BitsAlloc=%u BitsStored=%u", rows, cols, bitsAlloc, bitsStored);
+            // Check pixel data presence
+            DcmElement* pixElem = NULL;
+            if (dd->findAndGetElement(DCM_PixelData, pixElem).good() && pixElem) {
+                DEBUG_LOG("  PixelData present, length=%lu", pixElem->getLength());
+            } else {
+                DEBUG_LOG("  WARNING: No PixelData found!");
             }
+            dd->findAndGetOFStringArray(DCM_SpecificCharacterSet, v); DEBUG_LOG("  SpecificCharacterSet: %s", v.c_str());
+            // Meta header
+            DcmMetaInfo* mi = saveRef.getMetaInfo();
+            mi->findAndGetOFStringArray(DCM_MediaStorageSOPClassUID, v); DEBUG_LOG("  Meta SOPClassUID: %s", v.c_str());
+            mi->findAndGetOFStringArray(DCM_MediaStorageSOPInstanceUID, v); DEBUG_LOG("  Meta SOPInstanceUID: %s", v.c_str());
         }
         
-        // If native TS not negotiated, decompress and use uncompressed TS
-        if (presID == 0) {
-            presID = scu.findPresentationContextID(sopClassUID, UID_LittleEndianExplicitTransferSyntax);
-            if (presID == 0) {
-                presID = scu.findPresentationContextID(sopClassUID, UID_LittleEndianImplicitTransferSyntax);
-            }
-            if (presID == 0) {
-                presID = scu.findPresentationContextID(sopClassUID, "");
-            }
-            
-            // Need to decompress if dataset is compressed and we're sending uncompressed
-            if (presID > 0 && sendDataset) {
-                E_TransferSyntax origXfer = sendDataset->getOriginalXfer();
-                if (origXfer != EXS_LittleEndianImplicit && origXfer != EXS_LittleEndianExplicit &&
-                    origXfer != EXS_BigEndianExplicit && origXfer != EXS_Unknown) {
-                    DEBUG_LOG("Server doesn't accept native TS, decompressing...");
-                    // Register codecs for decompression
-                    static bool uploadCodecsRegistered = false;
-                    if (!uploadCodecsRegistered) {
-                        DcmRLEDecoderRegistration::registerCodecs();
-                        DJDecoderRegistration::registerCodecs();
-                        DJLSDecoderRegistration::registerCodecs();
-                        uploadCodecsRegistered = true;
-                    }
-                    sendDataset->chooseRepresentation(EXS_LittleEndianExplicit, NULL);
-                }
-            }
-        }
+        // Keep temp file for inspection (remove this line after debugging)
+        DEBUG_LOG("KEEPING temp DICOM file for inspection: %s", tmpPath.c_str());
         
-        if (presID == 0) {
-            result->error_message = strdup("No acceptable presentation context for storage");
-            scu.releaseAssociation();
-            return result;
-        }
+        // Use dcmtk_store_files — the proven, battle-tested C-STORE path
+        const char* paths[1] = { tmpPath.c_str() };
+        StoreResult* storeResult = dcmtk_store_files(server_host, server_port, ae_title, called_ae_title, paths, 1);
         
-        Uint16 rspStatusCode;
-        status = scu.sendSTORERequest(presID, "", sendDataset, rspStatusCode);
+        // Temporarily NOT deleting temp file for debugging
+        // remove(tmpPath.c_str());
         
-        if (status.good()) {
+        if (storeResult && storeResult->success_count > 0) {
             result->success = 1;
             result->study_instance_uid = strdup(studyUID);
             result->series_instance_uid = strdup(seriesUID);
             result->sop_instance_uid = strdup(sopUID);
-            DEBUG_LOG("Image uploaded successfully: SOP UID = %s", sopUID);
+            result->rsp_status_code = 0;
+            DEBUG_LOG("Image uploaded successfully via dcmtk_store_files: SOP UID = %s", sopUID);
         } else {
-            result->error_message = strdup(("C-STORE failed: " + std::string(status.text())).c_str());
+            std::string errMsg = "C-STORE failed";
+            if (storeResult && storeResult->error_message) {
+                errMsg = storeResult->error_message;
+            } else if (storeResult && storeResult->fail_count > 0) {
+                errMsg = "Server rejected the DICOM object";
+            }
+            result->error_message = strdup(errMsg.c_str());
+            result->rsp_status_code = -1;
         }
-        
-        scu.releaseAssociation();
+        if (storeResult) dcmtk_free_store_result(storeResult);
         
     } catch (const std::exception& e) {
         result->error_message = strdup(("Exception during image upload: " + std::string(e.what())).c_str());
@@ -1749,6 +1781,7 @@ MediaUploadResult* dcmtk_upload_multiframe(const char* server_host, int server_p
     result->study_instance_uid = nullptr;
     result->series_instance_uid = nullptr;
     result->sop_instance_uid = nullptr;
+    result->rsp_status_code = -1;
 
     if (!server_host || !ae_title || !called_ae_title || !patient_id || !image_paths || image_count < 1) {
         result->error_message = strdup("Invalid parameters for multi-frame upload");
@@ -2047,6 +2080,7 @@ MediaUploadResult* dcmtk_upload_video(const char* server_host, int server_port, 
     result->study_instance_uid = nullptr;
     result->series_instance_uid = nullptr;
     result->sop_instance_uid = nullptr;
+    result->rsp_status_code = -1;
     
     if (!server_host || !ae_title || !called_ae_title || !patient_id || !video_path) {
         result->error_message = strdup("Invalid input parameters for video upload");
@@ -2082,6 +2116,7 @@ MediaUploadResult* dcmtk_upload_video(const char* server_host, int server_port, 
         dcmGenerateUniqueIdentifier(sopUID, SITE_INSTANCE_UID_ROOT);
 
         auto fillCommonTags = [&](DcmDataset* dset, const char* sopClass) {
+            dset->putAndInsertOFStringArray(DCM_SpecificCharacterSet, "ISO_IR 100");
             dset->putAndInsertOFStringArray(DCM_PatientID, patient_id);
             dset->putAndInsertOFStringArray(DCM_PatientName, patient_id);
             dset->putAndInsertOFStringArray(DCM_PatientBirthDate, "");
@@ -2092,6 +2127,8 @@ MediaUploadResult* dcmtk_upload_video(const char* server_host, int server_port, 
             dset->putAndInsertOFStringArray(DCM_StudyTime, uploadTime.c_str());
             dset->putAndInsertOFStringArray(DCM_StudyDescription, study_description ? study_description : "Uploaded Video");
             dset->putAndInsertOFStringArray(DCM_AccessionNumber, "");
+            dset->putAndInsertOFStringArray(DCM_StudyID, "1");
+            dset->putAndInsertOFStringArray(DCM_ReferringPhysicianName, "");
 
             dset->putAndInsertOFStringArray(DCM_SeriesInstanceUID, seriesUID);
             dset->putAndInsertOFStringArray(DCM_SeriesNumber, "1");
@@ -2101,6 +2138,11 @@ MediaUploadResult* dcmtk_upload_video(const char* server_host, int server_port, 
             dset->putAndInsertOFStringArray(DCM_SOPInstanceUID, sopUID);
             dset->putAndInsertOFStringArray(DCM_SOPClassUID, sopClass);
             dset->putAndInsertOFStringArray(DCM_InstanceNumber, "1");
+            dset->putAndInsertOFStringArray(DCM_ContentDate, uploadDate.c_str());
+            dset->putAndInsertOFStringArray(DCM_ContentTime, uploadTime.c_str());
+            dset->putAndInsertOFStringArray(DCM_ConversionType, "WSD");
+            dset->putAndInsertOFStringArray(DCM_Manufacturer, "MedView");
+            dset->putAndInsertOFStringArray(DCM_ImageType, "DERIVED\\SECONDARY");
         };
 
         auto sendStore = [&](DcmDataset* dset, const char* sopClassUID, OFList<OFString>& tsList, std::string& sendErr) -> OFBool {
@@ -2109,6 +2151,9 @@ MediaUploadResult* dcmtk_upload_video(const char* server_host, int server_port, 
             scu.setPeerAETitle(called_ae_title);
             scu.setPeerHostName(server_host);
             scu.setPeerPort(server_port);
+            scu.setMaxReceivePDULength(16384);
+            scu.setACSETimeout(30);
+            scu.setDIMSETimeout(60);
             scu.addPresentationContext(sopClassUID, tsList);
 
             OFCondition status = scu.initNetwork();
@@ -3227,114 +3272,115 @@ StoreResult* dcmtk_store_files(const char* server_host, int server_port,
     }
 
     try {
-        DcmSCU scu;
-        scu.setAETitle(ae_title);
-        scu.setPeerAETitle(called_ae_title);
-        scu.setPeerHostName(server_host);
-        scu.setPeerPort(server_port);
-        scu.setMaxReceivePDULength(16384);
-        scu.setACSETimeout(30);
-        scu.setDIMSETimeout(60);
+        // Use DcmStorageSCU — the official DCMTK high-level C-STORE class.
+        // It handles: reading files, proposing presentation contexts per file's
+        // SOP class + transfer syntax, negotiating, decompressing if needed,
+        // and sending correctly on the matching presentation context.
+        DcmStorageSCU storageSCU;
+        storageSCU.setAETitle(ae_title);
+        storageSCU.setPeerAETitle(called_ae_title);
+        storageSCU.setPeerHostName(server_host);
+        storageSCU.setPeerPort(server_port);
+        storageSCU.setMaxReceivePDULength(16384);
+        storageSCU.setACSETimeout(30);
+        storageSCU.setDIMSETimeout(60);
+        // Allow decompressing lossless if server doesn't accept compressed TS
+        storageSCU.setDecompressionMode(DcmStorageSCU::DM_lossyAndLossless);
+        storageSCU.setHaltOnUnsuccessfulStoreMode(OFFalse);
 
-        // Collect all unique SOP classes and transfer syntaxes from the files
-        OFList<OFString> transferSyntaxes;
-        transferSyntaxes.push_back(UID_LittleEndianExplicitTransferSyntax);
-        transferSyntaxes.push_back(UID_LittleEndianImplicitTransferSyntax);
-        transferSyntaxes.push_back(UID_BigEndianExplicitTransferSyntax);
-        transferSyntaxes.push_back(UID_JPEGProcess1TransferSyntax);
-        transferSyntaxes.push_back(UID_JPEGProcess2_4TransferSyntax);
-        transferSyntaxes.push_back(UID_JPEGLSLosslessTransferSyntax);
-        transferSyntaxes.push_back(UID_JPEGLSLossyTransferSyntax);
-        transferSyntaxes.push_back(UID_JPEG2000LosslessOnlyTransferSyntax);
-        transferSyntaxes.push_back(UID_JPEG2000TransferSyntax);
-        transferSyntaxes.push_back(UID_RLELosslessTransferSyntax);
-        transferSyntaxes.push_back(UID_MPEG2MainProfileAtMainLevelTransferSyntax);
+        // Register decompression codecs
+        DJDecoderRegistration::registerCodecs();
+        DJLSDecoderRegistration::registerCodecs();
+        DcmRLEDecoderRegistration::registerCodecs();
 
-        // Read SOP classes from files and add presentation contexts
-        std::vector<OFString> sopClasses;
+        // Add each file to the transfer list
         for (int i = 0; i < file_count; i++) {
-            DcmFileFormat fileFormat;
-            OFCondition status = fileFormat.loadFile(file_paths[i]);
-            if (status.good()) {
-                OFString sopClassUID;
-                fileFormat.getDataset()->findAndGetOFString(DCM_SOPClassUID, sopClassUID);
-                if (!sopClassUID.empty()) {
-                    bool found = false;
-                    for (const auto& sc : sopClasses) {
-                        if (sc == sopClassUID) { found = true; break; }
-                    }
-                    if (!found) {
-                        sopClasses.push_back(sopClassUID);
-                        scu.addPresentationContext(sopClassUID, transferSyntaxes);
-                    }
-                }
+            OFCondition addStatus = storageSCU.addDicomFile(file_paths[i], ERM_autoDetect, OFFalse);
+            if (addStatus.bad()) {
+                DEBUG_LOG("Failed to add file %d: %s (%s)", i, file_paths[i], addStatus.text());
+                result->fail_count++;
             }
         }
 
-        // Add verification
-        OFList<OFString> verifTS;
-        verifTS.push_back(UID_LittleEndianImplicitTransferSyntax);
-        scu.addPresentationContext(UID_VerificationSOPClass, verifTS);
-
-        OFCondition cond = scu.initNetwork();
-        if (cond.bad()) {
+        if (storageSCU.getNumberOfSOPInstances() == 0) {
             result->error = 1;
-            std::string msg = "Network init failed: ";
-            msg += cond.text();
-            result->error_message = strdup(msg.c_str());
+            result->error_message = strdup("No valid DICOM files to store");
+            DJDecoderRegistration::cleanup();
+            DJLSDecoderRegistration::cleanup();
+            DcmRLEDecoderRegistration::cleanup();
             return result;
         }
-        if (!maybe_apply_tls(scu)) {
+
+        // Let DcmStorageSCU propose the right presentation contexts
+        OFCondition cond = storageSCU.addPresentationContexts();
+        if (cond.bad()) {
+            result->error = 1;
+            result->error_message = strdup(("addPresentationContexts failed: " + std::string(cond.text())).c_str());
+            DJDecoderRegistration::cleanup();
+            DJLSDecoderRegistration::cleanup();
+            DcmRLEDecoderRegistration::cleanup();
+            return result;
+        }
+
+        cond = storageSCU.initNetwork();
+        if (cond.bad()) {
+            result->error = 1;
+            result->error_message = strdup(("Network init failed: " + std::string(cond.text())).c_str());
+            DJDecoderRegistration::cleanup();
+            DJLSDecoderRegistration::cleanup();
+            DcmRLEDecoderRegistration::cleanup();
+            return result;
+        }
+        if (!maybe_apply_tls(storageSCU)) {
             result->error = 1;
             result->error_message = strdup("TLS configuration failed");
+            DJDecoderRegistration::cleanup();
+            DJLSDecoderRegistration::cleanup();
+            DcmRLEDecoderRegistration::cleanup();
             return result;
         }
 
-        cond = scu.negotiateAssociation();
+        cond = storageSCU.negotiateAssociation();
         if (cond.bad()) {
             result->error = 1;
-            std::string msg = "Association failed: ";
-            msg += cond.text();
-            result->error_message = strdup(msg.c_str());
+            result->error_message = strdup(("Association failed: " + std::string(cond.text())).c_str());
+            DJDecoderRegistration::cleanup();
+            DJLSDecoderRegistration::cleanup();
+            DcmRLEDecoderRegistration::cleanup();
             return result;
         }
 
-        // Send each file
-        for (int i = 0; i < file_count; i++) {
-            DEBUG_LOG("Sending file %d/%d: %s", i + 1, file_count, file_paths[i]);
-
-            DcmFileFormat fileFormat;
-            OFCondition loadStatus = fileFormat.loadFile(file_paths[i]);
-            if (loadStatus.bad()) {
-                DEBUG_LOG("Failed to load file: %s", file_paths[i]);
-                result->fail_count++;
-                continue;
-            }
-
-            DcmDataset* dataset = fileFormat.getDataset();
-            OFString sopClassUID, sopInstanceUID;
-            dataset->findAndGetOFString(DCM_SOPClassUID, sopClassUID);
-            dataset->findAndGetOFString(DCM_SOPInstanceUID, sopInstanceUID);
-
-            T_ASC_PresentationContextID presID = scu.findPresentationContextID(sopClassUID, "");
-            if (presID == 0) {
-                DEBUG_LOG("No presentation context for SOP class: %s", sopClassUID.c_str());
-                result->fail_count++;
-                continue;
-            }
-
-            Uint16 rspStatusCode = 0;
-            cond = scu.sendSTORERequest(presID, "", dataset, rspStatusCode);
-            if (cond.good() && (rspStatusCode == 0x0000 || (rspStatusCode & 0xFF00) == 0xB000)) {
-                DEBUG_LOG("Successfully stored instance: %s", sopInstanceUID.c_str());
-                result->success_count++;
-            } else {
-                DEBUG_LOG("Store failed for instance %s: status 0x%04X", sopInstanceUID.c_str(), rspStatusCode);
-                result->fail_count++;
-            }
+        // Send all SOP instances
+        cond = storageSCU.sendSOPInstances();
+        if (cond.bad()) {
+            DEBUG_LOG("sendSOPInstances returned: %s", cond.text());
         }
 
-        scu.releaseAssociation();
+        // Get status summary
+        OFString summary;
+        storageSCU.getStatusSummary(summary);
+        DEBUG_LOG("DcmStorageSCU summary:\n%s", summary.c_str());
+
+        storageSCU.releaseAssociation();
+
+        // Count successes/failures from the summary
+        // DcmStorageSCU tracks this internally but only exposes it through
+        // getStatusSummary(). We count based on total - fail_count (files that
+        // couldn't be added). The rest were attempted; if sendSOPInstances
+        // succeeded, they were sent.
+        int attempted = file_count - result->fail_count;
+        if (cond.good()) {
+            result->success_count = attempted;
+        } else {
+            // Some may have succeeded before the error
+            result->fail_count = file_count;
+            result->error_message = strdup(("Send failed: " + std::string(cond.text())).c_str());
+        }
+
+        DJDecoderRegistration::cleanup();
+        DJLSDecoderRegistration::cleanup();
+        DcmRLEDecoderRegistration::cleanup();
+
         DEBUG_LOG("Store complete: %d/%d succeeded", result->success_count, file_count);
 
     } catch (const std::exception& e) {

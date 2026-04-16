@@ -242,6 +242,7 @@ class DcmtkFlutter {
     required int serverPort,
     required String aeTitle,
     required String calledAeTitle,
+    String patientNameFilter = '',
   }) async {
     if (Platform.isIOS) {
       try {
@@ -250,6 +251,7 @@ class DcmtkFlutter {
           'serverPort': serverPort,
           'aeTitle': aeTitle,
           'calledAeTitle': calledAeTitle,
+          if (patientNameFilter.isNotEmpty) 'patientNameFilter': patientNameFilter,
         });
         
         // Convert each item to Map<String, dynamic> safely
@@ -445,7 +447,14 @@ class DcmtkFlutter {
           'comments': comments,
         });
         print('[Dart] iOS method channel returned: $result');
-        return Map<String, dynamic>.from(result as Map);
+        final resultMap = Map<String, dynamic>.from(result as Map);
+        if (resultMap['warning'] != null && (resultMap['warning'] as String).isNotEmpty) {
+          print('[Dart] CREATE PATIENT WARNING: ${resultMap['warning']}');
+        }
+        if (resultMap['rspStatusCode'] != null) {
+          print('[Dart] C-STORE response status: 0x${(resultMap['rspStatusCode'] as int).toRadixString(16).padLeft(4, '0').toUpperCase()}');
+        }
+        return resultMap;
       } on PlatformException catch (e) {
         print("[Dart] Error creating patient: ${e.message}");
         return {'success': false, 'error': e.message};

@@ -122,6 +122,8 @@ typedef struct {
     int success;
     char* error_message;
     char* generated_patient_id;
+    int rsp_status_code;
+    char* warning_message;
 } PatientCreationResult;
 
 // Media upload result
@@ -131,6 +133,7 @@ typedef struct {
     char* study_instance_uid;
     char* series_instance_uid;
     char* sop_instance_uid;
+    int rsp_status_code;
 } MediaUploadResult;
 
 // Server connection and query functions
@@ -138,7 +141,7 @@ int dcmtk_test_server_connection(const char* server_host, int server_port, const
 // TLS-enabled server connection test
 int dcmtk_test_server_connection_tls(const char* server_host, int server_port, const char* ae_title, const char* called_ae_title,
                                       const char* cert_file, const char* key_file, const char* ca_file);
-DicomQueryResult* dcmtk_query_patients(const char* server_host, int server_port, const char* ae_title, const char* called_ae_title);
+DicomQueryResult* dcmtk_query_patients(const char* server_host, int server_port, const char* ae_title, const char* called_ae_title, const char* patient_name_filter);
 DicomStudyQueryResult* dcmtk_query_studies_for_patient(const char* server_host, int server_port, const char* ae_title, const char* called_ae_title, const char* patient_id);
 
 // Extended query functions
