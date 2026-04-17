@@ -755,6 +755,58 @@ class DcmtkFlutter {
     final result = await _methodChannel.invokeMethod('isTlsEnabled');
     return result == true || result == 1;
   }
+
+  // ============================================================
+  // Multi-Planar Reconstruction (MPR)
+  // ============================================================
+
+  /// Build a 3D volume from a series of DICOM files.
+  /// Returns volume metadata including volumeId for subsequent calls.
+  Future<Map<String, dynamic>?> buildMprVolume(List<String> filePaths) async {
+    if (Platform.isIOS) {
+      try {
+        final dynamic result = await _methodChannel.invokeMethod('buildMprVolume', {
+          'filePaths': filePaths,
+        });
+        return Map<String, dynamic>.from(result as Map);
+      } on PlatformException catch (e) {
+        return {'error': e.message};
+      }
+    }
+    return {'error': 'MPR not supported on this platform'};
+  }
+
+  /// Get an MPR slice as RGBA pixel data.
+  /// plane: 0=axial, 1=sagittal, 2=coronal
+  Future<Map<String, dynamic>?> getMprSlice(int volumeId, int plane, int sliceIndex, {
+    double windowCenter = 0,
+    double windowWidth = 0,
+  }) async {
+    if (Platform.isIOS) {
+      try {
+        final dynamic result = await _methodChannel.invokeMethod('getMprSlice', {
+          'volumeId': volumeId,
+          'plane': plane,
+          'sliceIndex': sliceIndex,
+          'windowCenter': windowCenter,
+          'windowWidth': windowWidth,
+        });
+        return Map<String, dynamic>.from(result as Map);
+      } on PlatformException catch (e) {
+        return {'error': e.message};
+      }
+    }
+    return {'error': 'MPR not supported on this platform'};
+  }
+
+  /// Free a previously built MPR volume to release memory.
+  Future<void> freeMprVolume(int volumeId) async {
+    if (Platform.isIOS) {
+      await _methodChannel.invokeMethod('freeMprVolume', {
+        'volumeId': volumeId,
+      });
+    }
+  }
 }
 
 class DicomPatient {

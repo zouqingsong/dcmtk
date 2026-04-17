@@ -28,6 +28,8 @@
 #include <cstring>
 #include <cstdlib>
 #include <cstdio>
+#include <map>
+#include <cmath>
 #include <sys/stat.h>
 #include <dirent.h>
 
@@ -3814,6 +3816,383 @@ int dcmtk_is_tls_available(void) {
 
 int dcmtk_is_tls_enabled(void) {
     return g_tlsConfig.enabled ? 1 : 0;
+}
+
+// ============================================================
+// Multi-Planar Reconstruction (MPR) Volume
+// ============================================================
+
+struct MprVolume {
+    int16_t* data;           // 3D: data[z * width * height + y * width + x]
+    int width, height, depth;
+    double pixelSpacingX, pixelSpacingY, sliceSpacing;
+    double windowCenter, windowWidth;
+};
+
+static std::map<int, MprVolume*> g_volumes;
+static int g_nextVolumeId = 1;
+
+static inline uint8_t applyMprWindow(int16_t val, double center, double width) {
+    if (width <= 0) return 128;
+    double minVal = center - width / 2.0;
+    double maxVal = center + width / 2.0;
+    if (val <= minVal) return 0;
+    if (val >= maxVal) return 255;
+    return (uint8_t)((val - minVal) / width * 255.0);
+}
+
+static double dot3(const double* a, const double* b) {
+    return a[0]*b[0] + a[1]*b[1] + a[2]*b[2];
+}
+
+static void cross3(const double* a, const double* b, double* out) {
+    out[0] = a[1]*b[2] - a[2]*b[1];
+    out[1] = a[2]*b[0] - a[0]*b[2];
+    out[2] = a[0]*b[1] - a[1]*b[0];
+}
+
+MprVolumeInfo* dcmtk_build_mpr_volume(const char** file_paths, int file_count) {
+    MprVolumeInfo* info = (MprVolumeInfo*)calloc(1, sizeof(MprVolumeInfo));
+
+    if (!file_paths || file_count < 3) {
+        info->error = 1;
+        info->error_message = strdup("Need at least 3 DICOM files for MPR");
+        return info;
+    }
+
+    DEBUG_LOG("Building MPR volume from %d files", file_count);
+
+    // Register decompression codecs
+    DJDecoderRegistration::registerCodecs();
+    DJLSDecoderRegistration::registerCodecs();
+    DcmRLEDecoderRegistration::registerCodecs();
+
+    // Phase 1: Load metadata from all files
+    struct FileMetadata {
+        std::string path;
+        double position[3];
+        double orientation[6];
+        double pixelSpacing[2]; // row, col
+        int rows, cols;
+        int bitsAllocated;
+        int pixelRepresentation;
+        double rescaleSlope, rescaleIntercept;
+        double windowCenter, windowWidth;
+        double posAlongNormal;
+    };
+
+    std::vector<FileMetadata> files;
+
+    for (int i = 0; i < file_count; i++) {
+        if (!file_paths[i]) continue;
+
+        DcmFileFormat fileFormat;
+        OFCondition status = fileFormat.loadFile(file_paths[i]);
+        if (status.bad()) continue;
+
+        DcmDataset* dataset = fileFormat.getDataset();
+        if (!dataset) continue;
+
+        // Check SamplesPerPixel — only monochrome supported for MPR
+        Uint16 spp = 1;
+        dataset->findAndGetUint16(DCM_SamplesPerPixel, spp);
+        if (spp != 1) continue;
+
+        FileMetadata meta;
+        meta.path = file_paths[i];
+
+        // ImagePositionPatient (required)
+        OFString pos0, pos1, pos2;
+        if (dataset->findAndGetOFString(DCM_ImagePositionPatient, pos0, 0).bad()) continue;
+        dataset->findAndGetOFString(DCM_ImagePositionPatient, pos1, 1);
+        dataset->findAndGetOFString(DCM_ImagePositionPatient, pos2, 2);
+        meta.position[0] = atof(pos0.c_str());
+        meta.position[1] = atof(pos1.c_str());
+        meta.position[2] = atof(pos2.c_str());
+
+        // ImageOrientationPatient
+        for (int j = 0; j < 6; j++) {
+            OFString val;
+            if (dataset->findAndGetOFString(DCM_ImageOrientationPatient, val, j).good())
+                meta.orientation[j] = atof(val.c_str());
+            else
+                meta.orientation[j] = (j == 0 || j == 4) ? 1.0 : 0.0;
+        }
+
+        // PixelSpacing
+        OFString ps0, ps1;
+        meta.pixelSpacing[0] = 1.0;
+        meta.pixelSpacing[1] = 1.0;
+        if (dataset->findAndGetOFString(DCM_PixelSpacing, ps0, 0).good())
+            meta.pixelSpacing[0] = atof(ps0.c_str());
+        if (dataset->findAndGetOFString(DCM_PixelSpacing, ps1, 1).good())
+            meta.pixelSpacing[1] = atof(ps1.c_str());
+
+        // Dimensions
+        Uint16 rows = 0, cols = 0;
+        dataset->findAndGetUint16(DCM_Rows, rows);
+        dataset->findAndGetUint16(DCM_Columns, cols);
+        meta.rows = rows;
+        meta.cols = cols;
+
+        // Pixel format
+        Uint16 ba = 16, pr = 0;
+        dataset->findAndGetUint16(DCM_BitsAllocated, ba);
+        dataset->findAndGetUint16(DCM_PixelRepresentation, pr);
+        meta.bitsAllocated = ba;
+        meta.pixelRepresentation = pr;
+
+        // Rescale
+        OFString rsStr, riStr;
+        meta.rescaleSlope = 1.0;
+        meta.rescaleIntercept = 0.0;
+        if (dataset->findAndGetOFString(DCM_RescaleSlope, rsStr).good())
+            meta.rescaleSlope = atof(rsStr.c_str());
+        if (dataset->findAndGetOFString(DCM_RescaleIntercept, riStr).good())
+            meta.rescaleIntercept = atof(riStr.c_str());
+
+        // Window
+        OFString wcStr, wwStr;
+        meta.windowCenter = 40.0;
+        meta.windowWidth = 400.0;
+        if (dataset->findAndGetOFString(DCM_WindowCenter, wcStr).good())
+            meta.windowCenter = atof(wcStr.c_str());
+        if (dataset->findAndGetOFString(DCM_WindowWidth, wwStr).good())
+            meta.windowWidth = atof(wwStr.c_str());
+
+        files.push_back(meta);
+    }
+
+    if (files.size() < 3) {
+        info->error = 1;
+        info->error_message = strdup("Not enough valid DICOM files with spatial data for MPR");
+        return info;
+    }
+
+    // Validate: all same dimensions
+    int w = files[0].cols, h = files[0].rows;
+    for (size_t i = 1; i < files.size(); i++) {
+        if (files[i].cols != w || files[i].rows != h) {
+            info->error = 1;
+            info->error_message = strdup("Inconsistent image dimensions across series");
+            return info;
+        }
+    }
+
+    // Calculate slice normal from orientation
+    double rowDir[3] = {files[0].orientation[0], files[0].orientation[1], files[0].orientation[2]};
+    double colDir[3] = {files[0].orientation[3], files[0].orientation[4], files[0].orientation[5]};
+    double normal[3];
+    cross3(rowDir, colDir, normal);
+
+    // Project positions onto normal and sort
+    for (size_t i = 0; i < files.size(); i++) {
+        files[i].posAlongNormal = dot3(files[i].position, normal);
+    }
+    std::sort(files.begin(), files.end(), [](const FileMetadata& a, const FileMetadata& b) {
+        return a.posAlongNormal < b.posAlongNormal;
+    });
+
+    // Calculate slice spacing
+    int depth = (int)files.size();
+    double totalDist = files.back().posAlongNormal - files[0].posAlongNormal;
+    double sliceSpacing = (depth > 1) ? totalDist / (depth - 1) : 1.0;
+    if (sliceSpacing <= 0) sliceSpacing = 1.0;
+
+    DEBUG_LOG("Volume: %dx%dx%d, spacing: %.2f x %.2f x %.2f mm",
+              w, h, depth, files[0].pixelSpacing[1], files[0].pixelSpacing[0], sliceSpacing);
+
+    // Phase 2: Build 3D volume (int16_t with rescale applied)
+    size_t volumeSize = (size_t)w * h * depth;
+    int16_t* volumeData = (int16_t*)calloc(volumeSize, sizeof(int16_t));
+    if (!volumeData) {
+        info->error = 1;
+        info->error_message = strdup("Failed to allocate volume memory");
+        return info;
+    }
+
+    for (int z = 0; z < depth; z++) {
+        const FileMetadata& meta = files[z];
+
+        DcmFileFormat fileFormat;
+        OFCondition status = fileFormat.loadFile(meta.path.c_str());
+        if (status.bad()) continue;
+
+        DcmDataset* dataset = fileFormat.getDataset();
+        if (!dataset) continue;
+
+        // Decompress if needed
+        dataset->chooseRepresentation(EXS_LittleEndianExplicit, NULL);
+
+        int16_t* slicePtr = volumeData + ((size_t)z * w * h);
+
+        if (meta.bitsAllocated <= 8) {
+            const Uint8* pixelData = nullptr;
+            unsigned long pixelLen = 0;
+            dataset->findAndGetUint8Array(DCM_PixelData, pixelData, &pixelLen);
+            if (pixelData) {
+                int count = std::min((int)pixelLen, w * h);
+                for (int p = 0; p < count; p++) {
+                    double val = pixelData[p] * meta.rescaleSlope + meta.rescaleIntercept;
+                    slicePtr[p] = (int16_t)std::max(-32768.0, std::min(32767.0, val));
+                }
+            }
+        } else {
+            const Uint16* pixelData = nullptr;
+            unsigned long pixelLen = 0;
+            dataset->findAndGetUint16Array(DCM_PixelData, pixelData, &pixelLen);
+            if (pixelData) {
+                int count = std::min((int)(pixelLen), w * h);
+                for (int p = 0; p < count; p++) {
+                    int rawVal;
+                    if (meta.pixelRepresentation == 1)
+                        rawVal = (int16_t)pixelData[p];
+                    else
+                        rawVal = (uint16_t)pixelData[p];
+                    double val = rawVal * meta.rescaleSlope + meta.rescaleIntercept;
+                    slicePtr[p] = (int16_t)std::max(-32768.0, std::min(32767.0, val));
+                }
+            }
+        }
+
+        if (z % 50 == 0) {
+            DEBUG_LOG("Loaded slice %d/%d", z + 1, depth);
+        }
+    }
+
+    // Create volume object
+    MprVolume* volume = new MprVolume();
+    volume->data = volumeData;
+    volume->width = w;
+    volume->height = h;
+    volume->depth = depth;
+    volume->pixelSpacingX = files[0].pixelSpacing[1]; // column spacing
+    volume->pixelSpacingY = files[0].pixelSpacing[0]; // row spacing
+    volume->sliceSpacing = sliceSpacing;
+    volume->windowCenter = files[0].windowCenter;
+    volume->windowWidth = files[0].windowWidth;
+
+    int volumeId = g_nextVolumeId++;
+    g_volumes[volumeId] = volume;
+
+    info->volume_id = volumeId;
+    info->width = w;
+    info->height = h;
+    info->depth = depth;
+    info->pixel_spacing_x = volume->pixelSpacingX;
+    info->pixel_spacing_y = volume->pixelSpacingY;
+    info->slice_spacing = sliceSpacing;
+    info->window_center = volume->windowCenter;
+    info->window_width = volume->windowWidth;
+    info->error = 0;
+    info->error_message = nullptr;
+
+    DEBUG_LOG("MPR volume built: id=%d, %dx%dx%d, WC=%.1f WW=%.1f",
+              volumeId, w, h, depth, volume->windowCenter, volume->windowWidth);
+
+    return info;
+}
+
+MprSliceData* dcmtk_get_mpr_slice(int volume_id, int plane, int slice_index,
+                                    double window_center, double window_width) {
+    MprSliceData* result = (MprSliceData*)calloc(1, sizeof(MprSliceData));
+
+    auto it = g_volumes.find(volume_id);
+    if (it == g_volumes.end()) {
+        result->error = 1;
+        result->error_message = strdup("Volume not found");
+        return result;
+    }
+
+    MprVolume* vol = it->second;
+    int W = vol->width;
+    int H = vol->height;
+    int D = vol->depth;
+
+    double wc = (window_width > 0) ? window_center : vol->windowCenter;
+    double ww = (window_width > 0) ? window_width : vol->windowWidth;
+
+    int outW, outH;
+    switch (plane) {
+        case 0: // Axial: fixed Z, show X(cols) × Y(rows)
+            outW = W; outH = H;
+            slice_index = std::max(0, std::min(D - 1, slice_index));
+            break;
+        case 1: // Sagittal: fixed X, show Y(cols) × Z(rows)
+            outW = H; outH = D;
+            slice_index = std::max(0, std::min(W - 1, slice_index));
+            break;
+        case 2: // Coronal: fixed Y, show X(cols) × Z(rows)
+            outW = W; outH = D;
+            slice_index = std::max(0, std::min(H - 1, slice_index));
+            break;
+        default:
+            result->error = 1;
+            result->error_message = strdup("Invalid plane (0=axial, 1=sagittal, 2=coronal)");
+            return result;
+    }
+
+    unsigned char* rgba = (unsigned char*)malloc(outW * outH * 4);
+    if (!rgba) {
+        result->error = 1;
+        result->error_message = strdup("Failed to allocate slice memory");
+        return result;
+    }
+
+    for (int row = 0; row < outH; row++) {
+        for (int col = 0; col < outW; col++) {
+            int16_t val = 0;
+            switch (plane) {
+                case 0: // Axial: volume[z][y][x] where z=slice_index, y=row, x=col
+                    val = vol->data[(size_t)slice_index * W * H + row * W + col];
+                    break;
+                case 1: // Sagittal: fixed x=slice_index, display y(col) vs z(row), superior at top
+                    val = vol->data[(size_t)(D - 1 - row) * W * H + col * W + slice_index];
+                    break;
+                case 2: // Coronal: fixed y=slice_index, display x(col) vs z(row), superior at top
+                    val = vol->data[(size_t)(D - 1 - row) * W * H + slice_index * W + col];
+                    break;
+            }
+            uint8_t gray = applyMprWindow(val, wc, ww);
+            int idx = (row * outW + col) * 4;
+            rgba[idx]     = gray;
+            rgba[idx + 1] = gray;
+            rgba[idx + 2] = gray;
+            rgba[idx + 3] = 255;
+        }
+    }
+
+    result->data = rgba;
+    result->width = outW;
+    result->height = outH;
+    result->error = 0;
+    result->error_message = nullptr;
+    return result;
+}
+
+void dcmtk_free_mpr_volume(int volume_id) {
+    auto it = g_volumes.find(volume_id);
+    if (it != g_volumes.end()) {
+        free(it->second->data);
+        delete it->second;
+        g_volumes.erase(it);
+        DEBUG_LOG("MPR volume %d freed", volume_id);
+    }
+}
+
+void dcmtk_free_mpr_volume_info(MprVolumeInfo* info) {
+    if (info) {
+        if (info->error_message) free(info->error_message);
+        free(info);
+    }
+}
+
+void dcmtk_free_mpr_slice_data(MprSliceData* data) {
+    if (data) {
+        if (data->data) free(data->data);
+        if (data->error_message) free(data->error_message);
+        free(data);
+    }
 }
 
 }

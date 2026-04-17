@@ -189,6 +189,27 @@ extern "C" {
     void dcmtk_clear_tls_config(void);
     int dcmtk_is_tls_available(void);
     int dcmtk_is_tls_enabled(void);
+
+    // MPR Volume
+    typedef struct {
+        int volume_id;
+        int width, height, depth;
+        double pixel_spacing_x, pixel_spacing_y, slice_spacing;
+        double window_center, window_width;
+        int error;
+        char* error_message;
+    } MprVolumeInfo;
+    typedef struct {
+        unsigned char* data;
+        int width, height;
+        int error;
+        char* error_message;
+    } MprSliceData;
+    MprVolumeInfo* dcmtk_build_mpr_volume(const char** file_paths, int file_count);
+    MprSliceData* dcmtk_get_mpr_slice(int volume_id, int plane, int slice_index, double window_center, double window_width);
+    void dcmtk_free_mpr_volume(int volume_id);
+    void dcmtk_free_mpr_volume_info(MprVolumeInfo* info);
+    void dcmtk_free_mpr_slice_data(MprSliceData* data);
 #ifdef __cplusplus
 }
 #endif
@@ -1069,6 +1090,94 @@ extern "C" {
   } else if ([@"isTlsEnabled" isEqualToString:call.method]) {
     int enabled = dcmtk_is_tls_enabled();
     result(@(enabled == 1));
+
+  // === MPR Volume ===
+  } else if ([@"buildMprVolume" isEqualToString:call.method]) {
+    NSArray<NSString*>* filePaths = call.arguments[@"filePaths"];
+    if (filePaths == nil || filePaths.count < 3) {
+      result([FlutterError errorWithCode:@"INVALID_ARGUMENT"
+                                 message:@"Need at least 3 file paths for MPR"
+                                 details:nil]);
+      return;
+    }
+    NSArray<NSString*>* sPaths = [filePaths copy];
+    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+      int fileCount = (int)sPaths.count;
+      const char** cPaths = (const char**)malloc(fileCount * sizeof(const char*));
+      for (int i = 0; i < fileCount; i++) {
+        cPaths[i] = [sPaths[i] UTF8String];
+      }
+      MprVolumeInfo* info = dcmtk_build_mpr_volume(cPaths, fileCount);
+      free(cPaths);
+      dispatch_async(dispatch_get_main_queue(), ^{
+        if (info->error) {
+          NSString* errMsg = info->error_message ?
+              [NSString stringWithUTF8String:info->error_message] : @"Unknown MPR error";
+          dcmtk_free_mpr_volume_info(info);
+          result([FlutterError errorWithCode:@"MPR_ERROR" message:errMsg details:nil]);
+          return;
+        }
+        NSDictionary* dict = @{
+          @"volumeId": @(info->volume_id),
+          @"width": @(info->width),
+          @"height": @(info->height),
+          @"depth": @(info->depth),
+          @"pixelSpacingX": @(info->pixel_spacing_x),
+          @"pixelSpacingY": @(info->pixel_spacing_y),
+          @"sliceSpacing": @(info->slice_spacing),
+          @"windowCenter": @(info->window_center),
+          @"windowWidth": @(info->window_width),
+        };
+        dcmtk_free_mpr_volume_info(info);
+        result(dict);
+      });
+    });
+
+  } else if ([@"getMprSlice" isEqualToString:call.method]) {
+    NSNumber* volumeId = call.arguments[@"volumeId"];
+    NSNumber* plane = call.arguments[@"plane"];
+    NSNumber* sliceIndex = call.arguments[@"sliceIndex"];
+    NSNumber* windowCenter = call.arguments[@"windowCenter"];
+    NSNumber* windowWidth = call.arguments[@"windowWidth"];
+    if (volumeId == nil || plane == nil || sliceIndex == nil) {
+      result([FlutterError errorWithCode:@"INVALID_ARGUMENT"
+                                 message:@"volumeId, plane, and sliceIndex are required"
+                                 details:nil]);
+      return;
+    }
+    int vid = [volumeId intValue];
+    int pl = [plane intValue];
+    int si = [sliceIndex intValue];
+    double wc = windowCenter ? [windowCenter doubleValue] : 0;
+    double ww = windowWidth ? [windowWidth doubleValue] : 0;
+    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+      MprSliceData* slice = dcmtk_get_mpr_slice(vid, pl, si, wc, ww);
+      dispatch_async(dispatch_get_main_queue(), ^{
+        if (slice->error) {
+          NSString* errMsg = slice->error_message ?
+              [NSString stringWithUTF8String:slice->error_message] : @"Unknown slice error";
+          dcmtk_free_mpr_slice_data(slice);
+          result([FlutterError errorWithCode:@"MPR_ERROR" message:errMsg details:nil]);
+          return;
+        }
+        int dataLen = slice->width * slice->height * 4;
+        NSData* pixelData = [NSData dataWithBytes:slice->data length:dataLen];
+        NSDictionary* dict = @{
+          @"data": [FlutterStandardTypedData typedDataWithBytes:pixelData],
+          @"width": @(slice->width),
+          @"height": @(slice->height),
+        };
+        dcmtk_free_mpr_slice_data(slice);
+        result(dict);
+      });
+    });
+
+  } else if ([@"freeMprVolume" isEqualToString:call.method]) {
+    NSNumber* volumeId = call.arguments[@"volumeId"];
+    if (volumeId != nil) {
+      dcmtk_free_mpr_volume([volumeId intValue]);
+    }
+    result(nil);
 
   } else {
     result(FlutterMethodNotImplemented);

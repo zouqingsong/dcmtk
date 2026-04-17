@@ -229,6 +229,38 @@ int dcmtk_is_tls_available(void);
 // Returns 1 if TLS is currently enabled, 0 otherwise.
 int dcmtk_is_tls_enabled(void);
 
+// === Multi-Planar Reconstruction (MPR) ===
+typedef struct {
+    int volume_id;
+    int width;              // in-plane columns
+    int height;             // in-plane rows
+    int depth;              // number of slices
+    double pixel_spacing_x; // mm per pixel column
+    double pixel_spacing_y; // mm per pixel row
+    double slice_spacing;   // mm between slices
+    double window_center;   // default WC from DICOM
+    double window_width;    // default WW from DICOM
+    int error;
+    char* error_message;
+} MprVolumeInfo;
+
+typedef struct {
+    unsigned char* data;    // RGBA pixel data (4 bytes per pixel)
+    int width;
+    int height;
+    int error;
+    char* error_message;
+} MprSliceData;
+
+// Build a 3D volume from a series of DICOM files (must share dimensions + have spatial metadata)
+MprVolumeInfo* dcmtk_build_mpr_volume(const char** file_paths, int file_count);
+// Extract an MPR slice: plane 0=axial, 1=sagittal, 2=coronal
+MprSliceData* dcmtk_get_mpr_slice(int volume_id, int plane, int slice_index, double window_center, double window_width);
+// Free a previously built volume
+void dcmtk_free_mpr_volume(int volume_id);
+void dcmtk_free_mpr_volume_info(MprVolumeInfo* info);
+void dcmtk_free_mpr_slice_data(MprSliceData* data);
+
 #ifdef __cplusplus
 }
 #endif

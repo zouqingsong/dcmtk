@@ -133,6 +133,11 @@ public class DcmtkFlutterPlugin implements FlutterPlugin, MethodCallHandler {
       case "isTlsEnabled":
         result.success(nativeIsTlsEnabled());
         break;
+      case "buildMprVolume":
+      case "getMprSlice":
+      case "freeMprVolume":
+        result.error("NOT_IMPLEMENTED", "MPR not yet supported on Android", null);
+        break;
       default:
         result.notImplemented();
     }
