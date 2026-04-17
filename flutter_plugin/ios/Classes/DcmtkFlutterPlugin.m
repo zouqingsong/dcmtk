@@ -122,9 +122,9 @@ extern "C" {
     DicomStudyQueryResult* dcmtk_query_studies_for_patient(const char* server_host, int server_port, const char* ae_title, const char* called_ae_title, const char* patient_id);
     DicomSeriesQueryResult* dcmtk_query_series_for_study(const char* server_host, int server_port, const char* ae_title, const char* called_ae_title, const char* study_instance_uid);
     PatientCreationResult* dcmtk_create_patient(const char* server_host, int server_port, const char* ae_title, const char* called_ae_title, PatientInfo* patient_info);
-    MediaUploadResult* dcmtk_upload_image(const char* server_host, int server_port, const char* ae_title, const char* called_ae_title, const char* patient_id, const char* image_path, const char* study_description, const char* series_description, const char* image_comments, const char* modality, const char* study_instance_uid, const char* series_instance_uid, int instance_number);
-    MediaUploadResult* dcmtk_upload_multiframe(const char* server_host, int server_port, const char* ae_title, const char* called_ae_title, const char* patient_id, const char** image_paths, int image_count, const char* study_description, const char* series_description, const char* image_comments, const char* modality, const char* study_instance_uid, const char* series_instance_uid);
-    MediaUploadResult* dcmtk_upload_video(const char* server_host, int server_port, const char* ae_title, const char* called_ae_title, const char* patient_id, const char* video_path, const char* study_description, const char* series_description, const char* image_comments, const char* modality);
+    MediaUploadResult* dcmtk_upload_image(const char* server_host, int server_port, const char* ae_title, const char* called_ae_title, const char* patient_id, const char* image_path, const char* patient_name, const char* patient_birth_date, const char* study_description, const char* series_description, const char* image_comments, const char* modality, const char* study_instance_uid, const char* series_instance_uid, int instance_number);
+    MediaUploadResult* dcmtk_upload_multiframe(const char* server_host, int server_port, const char* ae_title, const char* called_ae_title, const char* patient_id, const char** image_paths, int image_count, const char* patient_name, const char* patient_birth_date, const char* study_description, const char* series_description, const char* image_comments, const char* modality, const char* study_instance_uid, const char* series_instance_uid);
+    MediaUploadResult* dcmtk_upload_video(const char* server_host, int server_port, const char* ae_title, const char* called_ae_title, const char* patient_id, const char* video_path, const char* patient_name, const char* patient_birth_date, const char* study_description, const char* series_description, const char* image_comments, const char* modality);
     void dcmtk_free_query_result(DicomQueryResult* result);
     void dcmtk_free_study_query_result(DicomStudyQueryResult* result);
     void dcmtk_free_series_query_result(DicomSeriesQueryResult* result);
@@ -566,6 +566,8 @@ extern "C" {
     NSString* calledAeTitle = call.arguments[@"calledAeTitle"];
     NSString* patientId = call.arguments[@"patientId"];
     NSString* imagePath = call.arguments[@"imagePath"];
+    NSString* patientName = call.arguments[@"patientName"];
+    NSString* patientBirthDate = call.arguments[@"patientBirthDate"];
     NSString* studyDescription = call.arguments[@"studyDescription"];
     NSString* seriesDescription = call.arguments[@"seriesDescription"];
     NSString* imageComments = call.arguments[@"imageComments"];
@@ -596,6 +598,8 @@ extern "C" {
     NSString* sCalled = [calledAeTitle copy];
     NSString* sPid = [patientId copy];
     NSString* sPath = [imagePath copy];
+    NSString* sPatientName = patientName ? [patientName copy] : nil;
+    NSString* sPatientBirthDate = patientBirthDate ? [patientBirthDate copy] : nil;
     NSString* sStudyDesc = studyDescription ? [studyDescription copy] : nil;
     NSString* sSeriesDesc = seriesDescription ? [seriesDescription copy] : nil;
     NSString* sComments = imageComments ? [imageComments copy] : nil;
@@ -611,6 +615,8 @@ extern "C" {
       const char* cCalledAeTitle = [sCalled UTF8String];
       const char* cPatientId = [sPid UTF8String];
       const char* cImagePath = [sPath UTF8String];
+      const char* cPatientName = sPatientName ? [sPatientName UTF8String] : "";
+      const char* cPatientBirthDate = sPatientBirthDate ? [sPatientBirthDate UTF8String] : "";
       const char* cStudyDescription = sStudyDesc ? [sStudyDesc UTF8String] : "Uploaded Image";
       const char* cSeriesDescription = sSeriesDesc ? [sSeriesDesc UTF8String] : "Uploaded Series";
       const char* cImageComments = sComments ? [sComments UTF8String] : "";
@@ -620,7 +626,7 @@ extern "C" {
     
       printf("[iOS] Calling dcmtk_upload_image native function on background thread\\n");
       fflush(stdout);
-      MediaUploadResult* uploadResult = dcmtk_upload_image(cServerHost, cServerPort, cAeTitle, cCalledAeTitle, cPatientId, cImagePath, cStudyDescription, cSeriesDescription, cImageComments, cModality, cStudyInstanceUID, cSeriesInstanceUID, instNum);
+      MediaUploadResult* uploadResult = dcmtk_upload_image(cServerHost, cServerPort, cAeTitle, cCalledAeTitle, cPatientId, cImagePath, cPatientName, cPatientBirthDate, cStudyDescription, cSeriesDescription, cImageComments, cModality, cStudyInstanceUID, cSeriesInstanceUID, instNum);
     
       printf("[iOS] dcmtk_upload_image returned, success: %d\\n", uploadResult->success);
       fflush(stdout);
@@ -660,6 +666,8 @@ extern "C" {
     NSString* calledAeTitle = call.arguments[@"calledAeTitle"];
     NSString* patientId = call.arguments[@"patientId"];
     NSArray<NSString*>* imagePaths = call.arguments[@"imagePaths"];
+    NSString* patientName = call.arguments[@"patientName"];
+    NSString* patientBirthDate = call.arguments[@"patientBirthDate"];
     NSString* studyDescription = call.arguments[@"studyDescription"];
     NSString* seriesDescription = call.arguments[@"seriesDescription"];
     NSString* imageComments = call.arguments[@"imageComments"];
@@ -681,6 +689,8 @@ extern "C" {
     NSString* sCalled = [calledAeTitle copy];
     NSString* sPid = [patientId copy];
     NSArray<NSString*>* sPaths = [imagePaths copy];
+    NSString* sPatientName = patientName ? [patientName copy] : nil;
+    NSString* sPatientBirthDate = patientBirthDate ? [patientBirthDate copy] : nil;
     NSString* sStudyDesc = studyDescription ? [studyDescription copy] : nil;
     NSString* sSeriesDesc = seriesDescription ? [seriesDescription copy] : nil;
     NSString* sComments = imageComments ? [imageComments copy] : nil;
@@ -698,6 +708,8 @@ extern "C" {
       MediaUploadResult* uploadResult = dcmtk_upload_multiframe(
         [sHost UTF8String], [sPort intValue], [sAe UTF8String], [sCalled UTF8String],
         [sPid UTF8String], cPaths, imageCount,
+        sPatientName ? [sPatientName UTF8String] : "",
+        sPatientBirthDate ? [sPatientBirthDate UTF8String] : "",
         sStudyDesc ? [sStudyDesc UTF8String] : "Uploaded Study",
         sSeriesDesc ? [sSeriesDesc UTF8String] : "Multi-frame Series",
         sComments ? [sComments UTF8String] : "",
@@ -734,6 +746,8 @@ extern "C" {
     NSString* calledAeTitle = call.arguments[@"calledAeTitle"];
     NSString* patientId = call.arguments[@"patientId"];
     NSString* videoPath = call.arguments[@"videoPath"];
+    NSString* patientName = call.arguments[@"patientName"];
+    NSString* patientBirthDate = call.arguments[@"patientBirthDate"];
     NSString* studyDescription = call.arguments[@"studyDescription"];
     NSString* seriesDescription = call.arguments[@"seriesDescription"];
     NSString* imageComments = call.arguments[@"imageComments"];
@@ -749,6 +763,8 @@ extern "C" {
     MediaUploadResult* uploadResult = dcmtk_upload_video(
       [serverHost UTF8String], [serverPort intValue], [aeTitle UTF8String], [calledAeTitle UTF8String],
       [patientId UTF8String], [videoPath UTF8String],
+      patientName ? [patientName UTF8String] : "",
+      patientBirthDate ? [patientBirthDate UTF8String] : "",
       studyDescription ? [studyDescription UTF8String] : "Uploaded Video",
       seriesDescription ? [seriesDescription UTF8String] : "Uploaded Video Series",
       imageComments ? [imageComments UTF8String] : "",

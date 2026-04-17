@@ -34,9 +34,9 @@ public class DcmtkFlutterPlugin implements FlutterPlugin, MethodCallHandler {
   private native HashMap<String, Object> nativeQuerySeriesForStudy(String serverHost, int serverPort, String aeTitle, String calledAeTitle, String studyInstanceUID);
   private native HashMap<String, Object> nativeQueryInstancesForSeries(String serverHost, int serverPort, String aeTitle, String calledAeTitle, String seriesInstanceUID);
   private native HashMap<String, Object> nativeCreatePatient(String serverHost, int serverPort, String aeTitle, String calledAeTitle, String patientId, String patientName, String birthDate, String sex, String comments);
-  private native HashMap<String, Object> nativeUploadImage(String serverHost, int serverPort, String aeTitle, String calledAeTitle, String patientId, String imagePath, String studyDescription, String seriesDescription, String imageComments, String modality, String studyInstanceUID, String seriesInstanceUID, int instanceNumber);
-  private native HashMap<String, Object> nativeUploadMultiframe(String serverHost, int serverPort, String aeTitle, String calledAeTitle, String patientId, String[] imagePaths, String studyDescription, String seriesDescription, String imageComments, String modality, String studyInstanceUID, String seriesInstanceUID);
-  private native HashMap<String, Object> nativeUploadVideo(String serverHost, int serverPort, String aeTitle, String calledAeTitle, String patientId, String videoPath, String studyDescription, String seriesDescription, String imageComments, String modality);
+  private native HashMap<String, Object> nativeUploadImage(String serverHost, int serverPort, String aeTitle, String calledAeTitle, String patientId, String imagePath, String patientName, String patientBirthDate, String studyDescription, String seriesDescription, String imageComments, String modality, String studyInstanceUID, String seriesInstanceUID, int instanceNumber);
+  private native HashMap<String, Object> nativeUploadMultiframe(String serverHost, int serverPort, String aeTitle, String calledAeTitle, String patientId, String[] imagePaths, String patientName, String patientBirthDate, String studyDescription, String seriesDescription, String imageComments, String modality, String studyInstanceUID, String seriesInstanceUID);
+  private native HashMap<String, Object> nativeUploadVideo(String serverHost, int serverPort, String aeTitle, String calledAeTitle, String patientId, String videoPath, String patientName, String patientBirthDate, String studyDescription, String seriesDescription, String imageComments, String modality);
   private native HashMap<String, Object> nativeDownloadInstances(String serverHost, int serverPort, String aeTitle, String calledAeTitle, String seriesInstanceUID, String localStoragePath);
   private native HashMap<String, Object> nativeMoveInstances(String serverHost, int serverPort, String aeTitle, String calledAeTitle, String seriesInstanceUID, String localStoragePath, int moveSCPPort);
   private native HashMap<String, Object> nativeExtractVideo(String dicomPath, String outputPath);
@@ -335,6 +335,8 @@ public class DcmtkFlutterPlugin implements FlutterPlugin, MethodCallHandler {
     String calledAeTitle = call.argument("calledAeTitle");
     String patientId = call.argument("patientId");
     String imagePath = call.argument("imagePath");
+    String patientName = call.argument("patientName");
+    String patientBirthDate = call.argument("patientBirthDate");
     String studyDescription = call.argument("studyDescription");
     String seriesDescription = call.argument("seriesDescription");
     String imageComments = call.argument("imageComments");
@@ -349,7 +351,7 @@ public class DcmtkFlutterPlugin implements FlutterPlugin, MethodCallHandler {
     int instNum = instanceNumber != null ? instanceNumber.intValue() : 1;
 
     new Thread(() -> {
-      HashMap<String, Object> uploadResult = nativeUploadImage(serverHost, serverPort.intValue(), aeTitle, calledAeTitle, patientId, imagePath, studyDescription, seriesDescription, imageComments, modality, studyInstanceUID, seriesInstanceUID, instNum);
+      HashMap<String, Object> uploadResult = nativeUploadImage(serverHost, serverPort.intValue(), aeTitle, calledAeTitle, patientId, imagePath, patientName != null ? patientName : "", patientBirthDate != null ? patientBirthDate : "", studyDescription, seriesDescription, imageComments, modality, studyInstanceUID, seriesInstanceUID, instNum);
       runOnMainThread(() -> {
         if (uploadResult.containsKey("error")) {
           result.error("UPLOAD_ERROR", (String) uploadResult.get("error"), null);
@@ -368,6 +370,8 @@ public class DcmtkFlutterPlugin implements FlutterPlugin, MethodCallHandler {
     String calledAeTitle = call.argument("calledAeTitle");
     String patientId = call.argument("patientId");
     List<String> imagePaths = call.argument("imagePaths");
+    String patientName = call.argument("patientName");
+    String patientBirthDate = call.argument("patientBirthDate");
     String studyDescription = call.argument("studyDescription");
     String seriesDescription = call.argument("seriesDescription");
     String imageComments = call.argument("imageComments");
@@ -381,7 +385,7 @@ public class DcmtkFlutterPlugin implements FlutterPlugin, MethodCallHandler {
     String[] pathsArray = imagePaths.toArray(new String[0]);
 
     new Thread(() -> {
-      HashMap<String, Object> uploadResult = nativeUploadMultiframe(serverHost, serverPort.intValue(), aeTitle, calledAeTitle, patientId, pathsArray, studyDescription, seriesDescription, imageComments, modality, studyInstanceUID, seriesInstanceUID);
+      HashMap<String, Object> uploadResult = nativeUploadMultiframe(serverHost, serverPort.intValue(), aeTitle, calledAeTitle, patientId, pathsArray, patientName != null ? patientName : "", patientBirthDate != null ? patientBirthDate : "", studyDescription, seriesDescription, imageComments, modality, studyInstanceUID, seriesInstanceUID);
       runOnMainThread(() -> {
         if (uploadResult.containsKey("error")) {
           result.error("UPLOAD_ERROR", (String) uploadResult.get("error"), null);
@@ -399,6 +403,8 @@ public class DcmtkFlutterPlugin implements FlutterPlugin, MethodCallHandler {
     String calledAeTitle = call.argument("calledAeTitle");
     String patientId = call.argument("patientId");
     String videoPath = call.argument("videoPath");
+    String patientName = call.argument("patientName");
+    String patientBirthDate = call.argument("patientBirthDate");
     String studyDescription = call.argument("studyDescription");
     String seriesDescription = call.argument("seriesDescription");
     String imageComments = call.argument("imageComments");
@@ -409,7 +415,7 @@ public class DcmtkFlutterPlugin implements FlutterPlugin, MethodCallHandler {
     }
 
     new Thread(() -> {
-      HashMap<String, Object> uploadResult = nativeUploadVideo(serverHost, serverPort.intValue(), aeTitle, calledAeTitle, patientId, videoPath, studyDescription, seriesDescription, imageComments, modality);
+      HashMap<String, Object> uploadResult = nativeUploadVideo(serverHost, serverPort.intValue(), aeTitle, calledAeTitle, patientId, videoPath, patientName != null ? patientName : "", patientBirthDate != null ? patientBirthDate : "", studyDescription, seriesDescription, imageComments, modality);
       runOnMainThread(() -> {
         if (uploadResult.containsKey("error")) {
           result.error("UPLOAD_ERROR", (String) uploadResult.get("error"), null);

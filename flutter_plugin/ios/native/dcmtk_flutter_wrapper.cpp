@@ -1421,7 +1421,7 @@ void dcmtk_free_patient_creation_result(PatientCreationResult* result) {
     }
 }
 
-MediaUploadResult* dcmtk_upload_image(const char* server_host, int server_port, const char* ae_title, const char* called_ae_title, const char* patient_id, const char* image_path, const char* study_description, const char* series_description, const char* image_comments, const char* modality, const char* study_instance_uid, const char* series_instance_uid, int instance_number) {
+MediaUploadResult* dcmtk_upload_image(const char* server_host, int server_port, const char* ae_title, const char* called_ae_title, const char* patient_id, const char* image_path, const char* patient_name, const char* patient_birth_date, const char* study_description, const char* series_description, const char* image_comments, const char* modality, const char* study_instance_uid, const char* series_instance_uid, int instance_number) {
     DEBUG_LOG("Uploading image: %s for patient %s to server %s:%d", 
              image_path ? image_path : "NULL", 
              patient_id ? patient_id : "NULL", 
@@ -1644,8 +1644,8 @@ MediaUploadResult* dcmtk_upload_image(const char* server_host, int server_port, 
             // Set patient/study/series/instance attributes
             dataset->putAndInsertOFStringArray(DCM_SpecificCharacterSet, "ISO_IR 100");
             dataset->putAndInsertOFStringArray(DCM_PatientID, patient_id);
-            dataset->putAndInsertOFStringArray(DCM_PatientName, patient_id);
-            dataset->putAndInsertOFStringArray(DCM_PatientBirthDate, "");
+            dataset->putAndInsertOFStringArray(DCM_PatientName, (patient_name && strlen(patient_name) > 0) ? patient_name : patient_id);
+            dataset->putAndInsertOFStringArray(DCM_PatientBirthDate, (patient_birth_date && strlen(patient_birth_date) > 0) ? patient_birth_date : "");
             dataset->putAndInsertOFStringArray(DCM_PatientSex, "");
             
             dataset->putAndInsertOFStringArray(DCM_StudyInstanceUID, studyUID);
@@ -1773,6 +1773,7 @@ void dcmtk_free_media_upload_result(MediaUploadResult* result) {
 MediaUploadResult* dcmtk_upload_multiframe(const char* server_host, int server_port,
     const char* ae_title, const char* called_ae_title, const char* patient_id,
     const char** image_paths, int image_count,
+    const char* patient_name, const char* patient_birth_date,
     const char* study_description, const char* series_description,
     const char* image_comments, const char* modality,
     const char* study_instance_uid, const char* series_instance_uid) {
@@ -1970,8 +1971,8 @@ MediaUploadResult* dcmtk_upload_multiframe(const char* server_host, int server_p
 
         // Patient
         dataset->putAndInsertOFStringArray(DCM_PatientID, patient_id);
-        dataset->putAndInsertOFStringArray(DCM_PatientName, patient_id);
-        dataset->putAndInsertOFStringArray(DCM_PatientBirthDate, "");
+        dataset->putAndInsertOFStringArray(DCM_PatientName, (patient_name && strlen(patient_name) > 0) ? patient_name : patient_id);
+        dataset->putAndInsertOFStringArray(DCM_PatientBirthDate, (patient_birth_date && strlen(patient_birth_date) > 0) ? patient_birth_date : "");
         dataset->putAndInsertOFStringArray(DCM_PatientSex, "");
 
         // Study
@@ -2090,7 +2091,7 @@ MediaUploadResult* dcmtk_upload_multiframe(const char* server_host, int server_p
 }
 
 // Video upload - encapsulates video file as DICOM Secondary Capture or Video object
-MediaUploadResult* dcmtk_upload_video(const char* server_host, int server_port, const char* ae_title, const char* called_ae_title, const char* patient_id, const char* video_path, const char* study_description, const char* series_description, const char* image_comments, const char* modality) {
+MediaUploadResult* dcmtk_upload_video(const char* server_host, int server_port, const char* ae_title, const char* called_ae_title, const char* patient_id, const char* video_path, const char* patient_name, const char* patient_birth_date, const char* study_description, const char* series_description, const char* image_comments, const char* modality) {
     DEBUG_LOG("Uploading video: %s for patient %s to server %s:%d",
              video_path ? video_path : "NULL",
              patient_id ? patient_id : "NULL",
@@ -2140,8 +2141,8 @@ MediaUploadResult* dcmtk_upload_video(const char* server_host, int server_port, 
         auto fillCommonTags = [&](DcmDataset* dset, const char* sopClass) {
             dset->putAndInsertOFStringArray(DCM_SpecificCharacterSet, "ISO_IR 100");
             dset->putAndInsertOFStringArray(DCM_PatientID, patient_id);
-            dset->putAndInsertOFStringArray(DCM_PatientName, patient_id);
-            dset->putAndInsertOFStringArray(DCM_PatientBirthDate, "");
+            dset->putAndInsertOFStringArray(DCM_PatientName, (patient_name && strlen(patient_name) > 0) ? patient_name : patient_id);
+            dset->putAndInsertOFStringArray(DCM_PatientBirthDate, (patient_birth_date && strlen(patient_birth_date) > 0) ? patient_birth_date : "");
             dset->putAndInsertOFStringArray(DCM_PatientSex, "");
 
             dset->putAndInsertOFStringArray(DCM_StudyInstanceUID, studyUID);

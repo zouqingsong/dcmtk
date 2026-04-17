@@ -459,7 +459,8 @@ Java_com_dcmtk_flutter_DcmtkFlutterPlugin_nativeCreatePatient(JNIEnv *env, jobje
 extern "C" JNIEXPORT jobject JNICALL
 Java_com_dcmtk_flutter_DcmtkFlutterPlugin_nativeUploadImage(JNIEnv *env, jobject,
         jstring serverHost, jint serverPort, jstring aeTitle, jstring calledAeTitle,
-        jstring patientId, jstring imagePath, jstring studyDescription, jstring seriesDescription,
+        jstring patientId, jstring imagePath, jstring patientName, jstring patientBirthDate,
+        jstring studyDescription, jstring seriesDescription,
         jstring imageComments, jstring modality, jstring studyInstanceUID, jstring seriesInstanceUID,
         jint instanceNumber) {
     const char *host = jstringToChar(env, serverHost);
@@ -467,6 +468,8 @@ Java_com_dcmtk_flutter_DcmtkFlutterPlugin_nativeUploadImage(JNIEnv *env, jobject
     const char *called = jstringToChar(env, calledAeTitle);
     const char *pid = jstringToChar(env, patientId);
     const char *imgPath = jstringToChar(env, imagePath);
+    const char *pName = jstringToChar(env, patientName);
+    const char *pDob = jstringToChar(env, patientBirthDate);
     const char *studyDesc = jstringToChar(env, studyDescription);
     const char *seriesDesc = jstringToChar(env, seriesDescription);
     const char *imgComments = jstringToChar(env, imageComments);
@@ -475,6 +478,8 @@ Java_com_dcmtk_flutter_DcmtkFlutterPlugin_nativeUploadImage(JNIEnv *env, jobject
     const char *seriesUID = jstringToChar(env, seriesInstanceUID);
 
     MediaUploadResult* uploadResult = dcmtk_upload_image(host, serverPort, ae, called, pid, imgPath,
+            pName ? pName : "",
+            pDob ? pDob : "",
             studyDesc ? studyDesc : "Uploaded Image",
             seriesDesc ? seriesDesc : "Uploaded Series",
             imgComments ? imgComments : "",
@@ -488,6 +493,8 @@ Java_com_dcmtk_flutter_DcmtkFlutterPlugin_nativeUploadImage(JNIEnv *env, jobject
     releaseString(env, calledAeTitle, called);
     releaseString(env, patientId, pid);
     releaseString(env, imagePath, imgPath);
+    releaseString(env, patientName, pName);
+    releaseString(env, patientBirthDate, pDob);
     releaseString(env, studyDescription, studyDesc);
     releaseString(env, seriesDescription, seriesDesc);
     releaseString(env, imageComments, imgComments);
@@ -531,12 +538,15 @@ Java_com_dcmtk_flutter_DcmtkFlutterPlugin_nativeUploadImage(JNIEnv *env, jobject
 extern "C" JNIEXPORT jobject JNICALL
 Java_com_dcmtk_flutter_DcmtkFlutterPlugin_nativeUploadMultiframe(JNIEnv *env, jobject,
         jstring serverHost, jint serverPort, jstring aeTitle, jstring calledAeTitle,
-        jstring patientId, jobjectArray imagePaths, jstring studyDescription, jstring seriesDescription,
+        jstring patientId, jobjectArray imagePaths, jstring patientName, jstring patientBirthDate,
+        jstring studyDescription, jstring seriesDescription,
         jstring imageComments, jstring modality, jstring studyInstanceUID, jstring seriesInstanceUID) {
     const char *host = jstringToChar(env, serverHost);
     const char *ae = jstringToChar(env, aeTitle);
     const char *called = jstringToChar(env, calledAeTitle);
     const char *pid = jstringToChar(env, patientId);
+    const char *pName = jstringToChar(env, patientName);
+    const char *pDob = jstringToChar(env, patientBirthDate);
     const char *studyDesc = jstringToChar(env, studyDescription);
     const char *seriesDesc = jstringToChar(env, seriesDescription);
     const char *imgComments = jstringToChar(env, imageComments);
@@ -554,6 +564,8 @@ Java_com_dcmtk_flutter_DcmtkFlutterPlugin_nativeUploadMultiframe(JNIEnv *env, jo
 
     MediaUploadResult* uploadResult = dcmtk_upload_multiframe(host, serverPort, ae, called, pid,
             cPaths, imageCount,
+            pName ? pName : "",
+            pDob ? pDob : "",
             studyDesc ? studyDesc : "Uploaded Study",
             seriesDesc ? seriesDesc : "Multi-frame Series",
             imgComments ? imgComments : "",
@@ -571,6 +583,8 @@ Java_com_dcmtk_flutter_DcmtkFlutterPlugin_nativeUploadMultiframe(JNIEnv *env, jo
     releaseString(env, aeTitle, ae);
     releaseString(env, calledAeTitle, called);
     releaseString(env, patientId, pid);
+    releaseString(env, patientName, pName);
+    releaseString(env, patientBirthDate, pDob);
     releaseString(env, studyDescription, studyDesc);
     releaseString(env, seriesDescription, seriesDesc);
     releaseString(env, imageComments, imgComments);
@@ -610,19 +624,24 @@ Java_com_dcmtk_flutter_DcmtkFlutterPlugin_nativeUploadMultiframe(JNIEnv *env, jo
 extern "C" JNIEXPORT jobject JNICALL
 Java_com_dcmtk_flutter_DcmtkFlutterPlugin_nativeUploadVideo(JNIEnv *env, jobject,
         jstring serverHost, jint serverPort, jstring aeTitle, jstring calledAeTitle,
-        jstring patientId, jstring videoPath, jstring studyDescription, jstring seriesDescription,
+        jstring patientId, jstring videoPath, jstring patientName, jstring patientBirthDate,
+        jstring studyDescription, jstring seriesDescription,
         jstring imageComments, jstring modality) {
     const char *host = jstringToChar(env, serverHost);
     const char *ae = jstringToChar(env, aeTitle);
     const char *called = jstringToChar(env, calledAeTitle);
     const char *pid = jstringToChar(env, patientId);
     const char *vidPath = jstringToChar(env, videoPath);
+    const char *pName = jstringToChar(env, patientName);
+    const char *pDob = jstringToChar(env, patientBirthDate);
     const char *studyDesc = jstringToChar(env, studyDescription);
     const char *seriesDesc = jstringToChar(env, seriesDescription);
     const char *imgComments = jstringToChar(env, imageComments);
     const char *mod = jstringToChar(env, modality);
 
     MediaUploadResult* uploadResult = dcmtk_upload_video(host, serverPort, ae, called, pid, vidPath,
+            pName ? pName : "",
+            pDob ? pDob : "",
             studyDesc ? studyDesc : "Uploaded Video",
             seriesDesc ? seriesDesc : "Uploaded Video Series",
             imgComments ? imgComments : "",
@@ -633,6 +652,8 @@ Java_com_dcmtk_flutter_DcmtkFlutterPlugin_nativeUploadVideo(JNIEnv *env, jobject
     releaseString(env, calledAeTitle, called);
     releaseString(env, patientId, pid);
     releaseString(env, videoPath, vidPath);
+    releaseString(env, patientName, pName);
+    releaseString(env, patientBirthDate, pDob);
     releaseString(env, studyDescription, studyDesc);
     releaseString(env, seriesDescription, seriesDesc);
     releaseString(env, imageComments, imgComments);
