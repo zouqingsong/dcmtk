@@ -1794,13 +1794,9 @@ MediaUploadResult* dcmtk_upload_multiframe(const char* server_host, int server_p
 
     try {
         // Register decompression codecs
-        static bool mfCodecsRegistered = false;
-        if (!mfCodecsRegistered) {
-            DcmRLEDecoderRegistration::registerCodecs();
-            DJDecoderRegistration::registerCodecs();
-            DJLSDecoderRegistration::registerCodecs();
-            mfCodecsRegistered = true;
-        }
+        DJDecoderRegistration::registerCodecs();
+        DJLSDecoderRegistration::registerCodecs();
+        DcmRLEDecoderRegistration::registerCodecs();
 
         // Phase 1: Decode all images to get pixel data and determine common dimensions
         struct FrameData {
@@ -1861,52 +1857,78 @@ MediaUploadResult* dcmtk_upload_multiframe(const char* server_host, int server_p
                 return result;
             }
 
-            // Decompress if needed so we get raw pixels
-            convDset->chooseRepresentation(EXS_LittleEndianExplicit, NULL);
+            // CRITICAL: Move elements to a clean dataset to avoid DcmPixelData
+            // copy corruption (same pattern as dcmtk_upload_image).
+            DcmFileFormat tmpFF;
+            DcmDataset* tmpDS = tmpFF.getDataset();
+            while (convDset->card() > 0) {
+                DcmElement* elem = OFstatic_cast(DcmElement*, convDset->remove(OFstatic_cast(unsigned long, 0)));
+                if (elem) tmpDS->insert(elem, OFTrue);
+            }
+            delete convDset;
 
-            // Render to get RGB pixel data
-            DicomImage dcmImg(convDset, convDset->getOriginalXfer());
-            if (dcmImg.getStatus() != EIS_Normal) {
-                result->error_message = strdup(("Cannot render image " + std::to_string(f + 1)).c_str());
-                delete convDset;
+            // Decompress JPEG to raw uncompressed pixels
+            OFCondition decStatus = tmpDS->chooseRepresentation(EXS_LittleEndianExplicit, NULL);
+            if (decStatus.bad() || !tmpDS->canWriteXfer(EXS_LittleEndianExplicit)) {
+                result->error_message = strdup(("Failed to decompress image " + std::to_string(f + 1)).c_str());
                 return result;
             }
 
-            int w = (int)dcmImg.getWidth();
-            int h = (int)dcmImg.getHeight();
+            // Fix PhotometricInterpretation: JPEG uses YBR_FULL_422 internally
+            // but after decompression to raw pixels, it's RGB
+            OFString photometric;
+            tmpDS->findAndGetOFStringArray(DCM_PhotometricInterpretation, photometric);
+            if (photometric == "YBR_FULL_422" || photometric == "YBR_FULL") {
+                tmpDS->putAndInsertOFStringArray(DCM_PhotometricInterpretation, "RGB");
+            }
+
+            // Get frame dimensions directly from dataset tags
+            Uint16 rows = 0, cols = 0, spp = 0;
+            tmpDS->findAndGetUint16(DCM_Rows, rows);
+            tmpDS->findAndGetUint16(DCM_Columns, cols);
+            tmpDS->findAndGetUint16(DCM_SamplesPerPixel, spp);
+
+            int w = (int)cols;
+            int h = (int)rows;
+
+            if (w == 0 || h == 0) {
+                result->error_message = strdup(("Invalid dimensions for image " + std::to_string(f + 1)).c_str());
+                return result;
+            }
+
+            // Extract raw pixel data directly from the decompressed dataset
+            const Uint8* pixelDataPtr = nullptr;
+            unsigned long pixelDataLen = 0;
+            OFCondition pixStatus = tmpDS->findAndGetUint8Array(DCM_PixelData, pixelDataPtr, &pixelDataLen);
+            if (pixStatus.bad() || !pixelDataPtr || pixelDataLen == 0) {
+                result->error_message = strdup(("Cannot extract pixels from image " + std::to_string(f + 1)).c_str());
+                return result;
+            }
 
             FrameData fd;
             fd.width = w;
             fd.height = h;
-
-            // Get 8-bit RGB pixels
-            const void* pixData = dcmImg.getOutputData(8, 0);
-            if (!pixData) {
-                result->error_message = strdup(("Cannot extract pixels from image " + std::to_string(f + 1)).c_str());
-                delete convDset;
-                return result;
-            }
-
-            int samplesPerPixel = (dcmImg.isMonochrome()) ? 1 : 3;
-            int pixelBytes = w * h * samplesPerPixel;
             fd.pixels.resize(w * h * 3); // Always store as RGB
 
-            if (samplesPerPixel == 1) {
+            if (spp == 1) {
                 // Convert grayscale to RGB
-                const Uint8* src = (const Uint8*)pixData;
                 for (int p = 0; p < w * h; p++) {
-                    fd.pixels[p * 3] = src[p];
-                    fd.pixels[p * 3 + 1] = src[p];
-                    fd.pixels[p * 3 + 2] = src[p];
+                    fd.pixels[p * 3] = pixelDataPtr[p];
+                    fd.pixels[p * 3 + 1] = pixelDataPtr[p];
+                    fd.pixels[p * 3 + 2] = pixelDataPtr[p];
                 }
             } else {
-                memcpy(fd.pixels.data(), pixData, pixelBytes);
+                int pixelBytes = w * h * 3;
+                if ((unsigned long)pixelBytes <= pixelDataLen) {
+                    memcpy(fd.pixels.data(), pixelDataPtr, pixelBytes);
+                } else {
+                    memcpy(fd.pixels.data(), pixelDataPtr, pixelDataLen);
+                }
             }
 
             frames.push_back(std::move(fd));
-            delete convDset;
 
-            DEBUG_LOG("Frame %d: %dx%d decoded", f + 1, w, h);
+            DEBUG_LOG("Frame %d: %dx%d, %d spp decoded", f + 1, w, h, (int)spp);
         }
 
         // Use dimensions from first frame
@@ -1969,16 +1991,19 @@ MediaUploadResult* dcmtk_upload_multiframe(const char* server_host, int server_p
         dataset->putAndInsertOFStringArray(DCM_Modality, modality ? modality : "SC");
 
         // Instance
-        const char* sopClassUID = UID_SecondaryCaptureImageStorage;
-        // Use Multi-frame SC if available
-        if (image_count > 1) {
-            sopClassUID = UID_MultiframeSingleBitSecondaryCaptureImageStorage;
-            // Actually use true color multi-frame SC
-            sopClassUID = UID_MultiframeTrueColorSecondaryCaptureImageStorage;
-        }
+        const char* sopClassUID = UID_MultiframeTrueColorSecondaryCaptureImageStorage;
         dataset->putAndInsertOFStringArray(DCM_SOPClassUID, sopClassUID);
         dataset->putAndInsertOFStringArray(DCM_SOPInstanceUID, sopUID);
         dataset->putAndInsertOFStringArray(DCM_InstanceNumber, "1");
+        dataset->putAndInsertOFStringArray(DCM_ConversionType, "WSD");
+        dataset->putAndInsertOFStringArray(DCM_Manufacturer, "MedView");
+        dataset->putAndInsertOFStringArray(DCM_ImageType, "DERIVED\\SECONDARY");
+        dataset->putAndInsertOFStringArray(DCM_PatientOrientation, "");
+        OFString contentDate, contentTime;
+        DcmDate::getCurrentDate(contentDate);
+        DcmTime::getCurrentTime(contentTime);
+        dataset->putAndInsertOFStringArray(DCM_ContentDate, contentDate.c_str());
+        dataset->putAndInsertOFStringArray(DCM_ContentTime, contentTime.c_str());
 
         // Image attributes
         dataset->putAndInsertUint16(DCM_SamplesPerPixel, 3);
@@ -2012,57 +2037,50 @@ MediaUploadResult* dcmtk_upload_multiframe(const char* server_host, int server_p
         DEBUG_LOG("Multi-frame DICOM: %dx%d, %d frames, %lu bytes pixel data",
             targetW, targetH, image_count, (unsigned long)allPixels.size());
 
-        // Phase 3: C-STORE
-        E_TransferSyntax outputTS = EXS_LittleEndianExplicit;
-        DcmSCU scu;
-        scu.setAETitle(ae_title);
-        scu.setPeerAETitle(called_ae_title);
-        scu.setPeerHostName(server_host);
-        scu.setPeerPort(server_port);
+        // Phase 3: Save to temp file and use dcmtk_store_files (the proven C-STORE path)
+        fileFormat.getMetaInfo()->putAndInsertOFStringArray(DCM_MediaStorageSOPClassUID, sopClassUID);
+        fileFormat.getMetaInfo()->putAndInsertOFStringArray(DCM_MediaStorageSOPInstanceUID, sopUID);
 
-        OFList<OFString> transferSyntaxes;
-        transferSyntaxes.push_back(UID_LittleEndianExplicitTransferSyntax);
-        transferSyntaxes.push_back(UID_LittleEndianImplicitTransferSyntax);
+        std::string tmpDir;
+        const char* envTmp = getenv("TMPDIR");
+        if (envTmp && strlen(envTmp) > 0) {
+            tmpDir = envTmp;
+        } else {
+            tmpDir = "/tmp";
+        }
+        std::string tmpPath = tmpDir + "/medview_multiframe_" + std::string(sopUID) + ".dcm";
 
-        scu.addPresentationContext(sopClassUID, transferSyntaxes);
-
-        OFCondition status = scu.initNetwork();
-        if (status.bad()) {
-            result->error_message = strdup(("Network init failed: " + std::string(status.text())).c_str());
+        OFCondition saveStatus = fileFormat.saveFile(tmpPath.c_str(), EXS_LittleEndianExplicit);
+        if (saveStatus.bad()) {
+            result->error_message = strdup(("Failed to save temp DICOM: " + std::string(saveStatus.text())).c_str());
             return result;
         }
-        if (!maybe_apply_tls(scu)) {
-            result->error_message = strdup("TLS configuration failed");
-            return result;
-        }
+        DEBUG_LOG("Saved temp multi-frame DICOM: %s", tmpPath.c_str());
 
-        status = scu.negotiateAssociation();
-        if (status.bad()) {
-            result->error_message = strdup(("Association failed: " + std::string(status.text())).c_str());
-            return result;
-        }
+        const char* paths[1] = { tmpPath.c_str() };
+        StoreResult* storeResult = dcmtk_store_files(server_host, server_port, ae_title, called_ae_title, paths, 1);
 
-        T_ASC_PresentationContextID presID = scu.findPresentationContextID(sopClassUID, "");
-        if (presID == 0) {
-            result->error_message = strdup("No acceptable presentation context for multi-frame storage");
-            scu.releaseAssociation();
-            return result;
-        }
+        remove(tmpPath.c_str());
 
-        Uint16 rspStatusCode;
-        status = scu.sendSTORERequest(presID, "", dataset, rspStatusCode);
-
-        if (status.good()) {
+        if (storeResult && storeResult->success_count > 0) {
             result->success = 1;
             result->study_instance_uid = strdup(studyUID);
             result->series_instance_uid = strdup(seriesUID);
             result->sop_instance_uid = strdup(sopUID);
-            DEBUG_LOG("Multi-frame uploaded: SOP UID = %s, %d frames", sopUID, image_count);
+            result->rsp_status_code = 0;
+            DEBUG_LOG("Multi-frame uploaded via dcmtk_store_files: SOP UID = %s, %d frames", sopUID, image_count);
         } else {
-            result->error_message = strdup(("C-STORE failed: " + std::string(status.text())).c_str());
+            std::string errMsg = "C-STORE failed";
+            if (storeResult && storeResult->error_message) {
+                errMsg = std::string("C-STORE failed: ") + storeResult->error_message;
+            } else if (storeResult && storeResult->fail_count > 0) {
+                errMsg = "Server rejected the multi-frame DICOM object";
+            }
+            result->error_message = strdup(errMsg.c_str());
+            result->rsp_status_code = -1;
+            DEBUG_LOG("Multi-frame upload failed: %s", errMsg.c_str());
         }
-
-        scu.releaseAssociation();
+        if (storeResult) dcmtk_free_store_result(storeResult);
 
     } catch (const std::exception& e) {
         result->error_message = strdup(("Exception: " + std::string(e.what())).c_str());
@@ -3381,11 +3399,17 @@ StoreResult* dcmtk_store_files(const char* server_host, int server_port,
         // Use the ACTUAL per-instance status counts
         result->success_count = storageSCU.successCount;
         result->fail_count += storageSCU.failCount;
-        if (storageSCU.failCount > 0 && result->error_message == nullptr) {
-            char msg[128];
-            snprintf(msg, sizeof(msg), "Server rejected %d instance(s) with status 0x%04X",
-                     storageSCU.failCount, storageSCU.lastFailStatus);
-            result->error_message = strdup(msg);
+        if (result->success_count == 0 && result->error_message == nullptr) {
+            if (storageSCU.failCount > 0) {
+                char msg[128];
+                snprintf(msg, sizeof(msg), "Server rejected %d instance(s) with status 0x%04X",
+                         storageSCU.failCount, storageSCU.lastFailStatus);
+                result->error_message = strdup(msg);
+            } else if (cond.bad()) {
+                result->error_message = strdup(("sendSOPInstances failed: " + std::string(cond.text())).c_str());
+            } else {
+                result->error_message = strdup(("No instances sent. Summary: " + std::string(summary.c_str())).c_str());
+            }
         }
 
         DJDecoderRegistration::cleanup();

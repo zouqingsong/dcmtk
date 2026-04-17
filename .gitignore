@@ -122,3 +122,4 @@ oficonv/apps/mkesdb
 .vscode/launch.json
 /flutter_plugin/.dart_tool
 /flutter_plugin/.dart_tool
+/flutter_plugin/android/.cxx
