@@ -125,6 +125,7 @@ extern "C" {
     MediaUploadResult* dcmtk_upload_image(const char* server_host, int server_port, const char* ae_title, const char* called_ae_title, const char* patient_id, const char* image_path, const char* patient_name, const char* patient_birth_date, const char* study_description, const char* series_description, const char* image_comments, const char* modality, const char* study_instance_uid, const char* series_instance_uid, int instance_number);
     MediaUploadResult* dcmtk_upload_multiframe(const char* server_host, int server_port, const char* ae_title, const char* called_ae_title, const char* patient_id, const char** image_paths, int image_count, const char* patient_name, const char* patient_birth_date, const char* study_description, const char* series_description, const char* image_comments, const char* modality, const char* study_instance_uid, const char* series_instance_uid);
     MediaUploadResult* dcmtk_upload_video(const char* server_host, int server_port, const char* ae_title, const char* called_ae_title, const char* patient_id, const char* video_path, const char* patient_name, const char* patient_birth_date, const char* study_description, const char* series_description, const char* image_comments, const char* modality);
+    MediaUploadResult* dcmtk_convert_image_to_dicom(const char* image_path, const char* output_path, const char* patient_id, const char* patient_name, const char* patient_birth_date, const char* study_description, const char* series_description, const char* image_comments, const char* modality, const char* study_instance_uid, const char* series_instance_uid, int instance_number);
     void dcmtk_free_query_result(DicomQueryResult* result);
     void dcmtk_free_study_query_result(DicomStudyQueryResult* result);
     void dcmtk_free_series_query_result(DicomSeriesQueryResult* result);
@@ -578,6 +579,73 @@ extern "C" {
     dcmtk_free_patient_creation_result(creationResult);
     result(resultDict);
     
+  } else if ([@"convertImageToDicom" isEqualToString:call.method]) {
+    NSString* imagePath = call.arguments[@"imagePath"];
+    NSString* outputPath = call.arguments[@"outputPath"];
+    NSString* patientId = call.arguments[@"patientId"];
+    NSString* patientName = call.arguments[@"patientName"];
+    NSString* patientBirthDate = call.arguments[@"patientBirthDate"];
+    NSString* studyDescription = call.arguments[@"studyDescription"];
+    NSString* seriesDescription = call.arguments[@"seriesDescription"];
+    NSString* imageComments = call.arguments[@"imageComments"];
+    NSString* modality = call.arguments[@"modality"];
+    NSString* studyInstanceUID = call.arguments[@"studyInstanceUID"];
+    NSString* seriesInstanceUID = call.arguments[@"seriesInstanceUID"];
+    NSNumber* instanceNumber = call.arguments[@"instanceNumber"];
+
+    if (imagePath == nil || outputPath == nil) {
+      result([FlutterError errorWithCode:@"INVALID_ARGUMENT"
+                                 message:@"imagePath and outputPath are required"
+                                 details:nil]);
+      return;
+    }
+
+    NSString* sImagePath = [imagePath copy];
+    NSString* sOutputPath = [outputPath copy];
+    NSString* sPid = patientId ? [patientId copy] : nil;
+    NSString* sPName = patientName ? [patientName copy] : nil;
+    NSString* sBirthDate = patientBirthDate ? [patientBirthDate copy] : nil;
+    NSString* sStudyDesc = studyDescription ? [studyDescription copy] : nil;
+    NSString* sSeriesDesc = seriesDescription ? [seriesDescription copy] : nil;
+    NSString* sComments = imageComments ? [imageComments copy] : nil;
+    NSString* sModality = modality ? [modality copy] : nil;
+    NSString* sStudyUID = studyInstanceUID ? [studyInstanceUID copy] : nil;
+    NSString* sSeriesUID = seriesInstanceUID ? [seriesInstanceUID copy] : nil;
+    int instNum = instanceNumber ? [instanceNumber intValue] : 1;
+
+    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+      MediaUploadResult* convResult = dcmtk_convert_image_to_dicom(
+        [sImagePath UTF8String],
+        [sOutputPath UTF8String],
+        sPid ? [sPid UTF8String] : "",
+        sPName ? [sPName UTF8String] : "",
+        sBirthDate ? [sBirthDate UTF8String] : "",
+        sStudyDesc ? [sStudyDesc UTF8String] : "Exported Image",
+        sSeriesDesc ? [sSeriesDesc UTF8String] : "Exported Series",
+        sComments ? [sComments UTF8String] : "",
+        sModality ? [sModality UTF8String] : "SC",
+        sStudyUID ? [sStudyUID UTF8String] : "",
+        sSeriesUID ? [sSeriesUID UTF8String] : "",
+        instNum
+      );
+
+      dispatch_async(dispatch_get_main_queue(), ^{
+        if (!convResult->success) {
+          NSString* errorMsg = convResult->error_message ?
+              [NSString stringWithUTF8String:convResult->error_message] : @"Unknown conversion error";
+          result(@{@"success": @NO, @"error": errorMsg});
+        } else {
+          result(@{
+            @"success": @YES,
+            @"studyInstanceUID": convResult->study_instance_uid ? [NSString stringWithUTF8String:convResult->study_instance_uid] : @"",
+            @"seriesInstanceUID": convResult->series_instance_uid ? [NSString stringWithUTF8String:convResult->series_instance_uid] : @"",
+            @"sopInstanceUID": convResult->sop_instance_uid ? [NSString stringWithUTF8String:convResult->sop_instance_uid] : @"",
+          });
+        }
+        dcmtk_free_media_upload_result(convResult);
+      });
+    });
+
   } else if ([@"uploadImage" isEqualToString:call.method]) {
     printf("[iOS] uploadImage method called\\n");
     fflush(stdout);

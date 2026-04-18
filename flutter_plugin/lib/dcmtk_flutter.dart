@@ -467,6 +467,49 @@ class DcmtkFlutter {
     }
   }
 
+  /// Convert a JPEG/BMP image to a DICOM Secondary Capture file (no network).
+  /// Returns {success, studyInstanceUID, seriesInstanceUID, sopInstanceUID} or {success: false, error}.
+  Future<Map<String, dynamic>> convertImageToDicom({
+    required String imagePath,
+    required String outputPath,
+    String patientId = '',
+    String patientName = '',
+    String patientBirthDate = '',
+    String studyDescription = 'Exported Image',
+    String seriesDescription = 'Exported Series',
+    String imageComments = '',
+    String modality = 'SC',
+    String studyInstanceUID = '',
+    String seriesInstanceUID = '',
+    int instanceNumber = 1,
+  }) async {
+    if (Platform.isIOS) {
+      try {
+        final dynamic result = await _methodChannel.invokeMethod('convertImageToDicom', {
+          'imagePath': imagePath,
+          'outputPath': outputPath,
+          'patientId': patientId,
+          'patientName': patientName,
+          'patientBirthDate': patientBirthDate,
+          'studyDescription': studyDescription,
+          'seriesDescription': seriesDescription,
+          'imageComments': imageComments,
+          'modality': modality,
+          'studyInstanceUID': studyInstanceUID,
+          'seriesInstanceUID': seriesInstanceUID,
+          'instanceNumber': instanceNumber,
+        });
+        return Map<String, dynamic>.from(result as Map);
+      } on PlatformException catch (e) {
+        return {'success': false, 'error': e.message};
+      }
+    } else if (Platform.isAndroid) {
+      return {'success': false, 'error': 'Not implemented for Android'};
+    } else {
+      return {'success': false, 'error': 'Platform not supported'};
+    }
+  }
+
   /// Upload image to DICOM server for a specific patient
   /// Returns upload result with generated UIDs
   Future<Map<String, dynamic>> uploadImage({

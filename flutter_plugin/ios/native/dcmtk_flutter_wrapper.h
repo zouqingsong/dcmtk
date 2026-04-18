@@ -156,6 +156,14 @@ MediaUploadResult* dcmtk_upload_image(const char* server_host, int server_port, 
 MediaUploadResult* dcmtk_upload_multiframe(const char* server_host, int server_port, const char* ae_title, const char* called_ae_title, const char* patient_id, const char** image_paths, int image_count, const char* patient_name, const char* patient_birth_date, const char* study_description, const char* series_description, const char* image_comments, const char* modality, const char* study_instance_uid, const char* series_instance_uid);
 MediaUploadResult* dcmtk_upload_video(const char* server_host, int server_port, const char* ae_title, const char* called_ae_title, const char* patient_id, const char* video_path, const char* patient_name, const char* patient_birth_date, const char* study_description, const char* series_description, const char* image_comments, const char* modality);
 
+// Local Image2Dcm conversion (no network upload)
+// Converts a JPEG/BMP image to a DICOM Secondary Capture file saved at output_path.
+MediaUploadResult* dcmtk_convert_image_to_dicom(const char* image_path, const char* output_path,
+    const char* patient_id, const char* patient_name, const char* patient_birth_date,
+    const char* study_description, const char* series_description, const char* image_comments,
+    const char* modality, const char* study_instance_uid, const char* series_instance_uid,
+    int instance_number);
+
 // Media retrieval functions
 DicomInstanceQueryResult* dcmtk_download_instances(const char* server_host, int server_port, const char* ae_title, const char* called_ae_title, const char* series_instance_uid, const char* local_storage_path);
 

@@ -1771,6 +1771,190 @@ void dcmtk_free_media_upload_result(MediaUploadResult* result) {
     }
 }
 
+// Convert a JPEG/BMP image to a DICOM file saved locally (no network upload).
+MediaUploadResult* dcmtk_convert_image_to_dicom(const char* image_path, const char* output_path,
+    const char* patient_id, const char* patient_name, const char* patient_birth_date,
+    const char* study_description, const char* series_description, const char* image_comments,
+    const char* modality, const char* study_instance_uid, const char* series_instance_uid,
+    int instance_number) {
+
+    DEBUG_LOG("Converting image to DICOM: %s -> %s", image_path ? image_path : "NULL", output_path ? output_path : "NULL");
+
+    MediaUploadResult* result = (MediaUploadResult*)malloc(sizeof(MediaUploadResult));
+    result->success = 0;
+    result->error_message = nullptr;
+    result->study_instance_uid = nullptr;
+    result->series_instance_uid = nullptr;
+    result->sop_instance_uid = nullptr;
+    result->rsp_status_code = 0;
+
+    if (!image_path || !output_path) {
+        result->error_message = strdup("image_path and output_path are required");
+        return result;
+    }
+
+    try {
+        struct stat fileStat;
+        if (stat(image_path, &fileStat) != 0) {
+            result->error_message = strdup(("Image file not found: " + std::string(image_path)).c_str());
+            return result;
+        }
+
+        char studyUID[100], seriesUID[100], sopUID[100];
+        if (study_instance_uid && strlen(study_instance_uid) > 0) {
+            strncpy(studyUID, study_instance_uid, 99); studyUID[99] = '\0';
+        } else {
+            dcmGenerateUniqueIdentifier(studyUID, SITE_STUDY_UID_ROOT);
+        }
+        if (series_instance_uid && strlen(series_instance_uid) > 0) {
+            strncpy(seriesUID, series_instance_uid, 99); seriesUID[99] = '\0';
+        } else {
+            dcmGenerateUniqueIdentifier(seriesUID, SITE_SERIES_UID_ROOT);
+        }
+        dcmGenerateUniqueIdentifier(sopUID, SITE_INSTANCE_UID_ROOT);
+
+        std::string path(image_path);
+        std::string ext;
+        size_t dotPos = path.rfind('.');
+        if (dotPos != std::string::npos) {
+            ext = path.substr(dotPos + 1);
+            for (auto& c : ext) c = tolower(c);
+        }
+
+        bool isJpeg = (ext == "jpg" || ext == "jpeg");
+        bool isBmp = (ext == "bmp");
+
+        DcmFileFormat fileFormat;
+        DcmDataset* dataset = nullptr;
+        E_TransferSyntax outputTS = EXS_LittleEndianExplicit;
+        const char* sopClassUID = UID_SecondaryCaptureImageStorage;
+
+        if (isJpeg || isBmp) {
+            I2DImgSource* imgSource = nullptr;
+            if (isJpeg) {
+                I2DJpegSource* jpegSrc = new I2DJpegSource();
+                jpegSrc->setExtSeqSupport(OFTrue);
+                jpegSrc->setProgrSupport(OFTrue);
+                imgSource = jpegSrc;
+            } else {
+                imgSource = new I2DBmpSource();
+            }
+            imgSource->setImageFile(image_path);
+
+            I2DOutputPlug* outPlug = new I2DOutputPlugSC();
+            sopClassUID = UID_SecondaryCaptureImageStorage;
+
+            Image2Dcm converter;
+            DcmDataset* convertedDset = nullptr;
+            E_TransferSyntax proposedTS;
+
+            OFCondition convStatus = converter.convertFirstFrame(imgSource, outPlug, 1, convertedDset, proposedTS);
+            if (convStatus.good()) {
+                convStatus = converter.updateLossyCompressionInfo(imgSource, 1, convertedDset);
+            }
+
+            delete imgSource;
+            delete outPlug;
+
+            if (convStatus.bad() || !convertedDset) {
+                result->error_message = strdup(("Image2Dcm conversion failed: " + std::string(convStatus.text())).c_str());
+                if (convertedDset) delete convertedDset;
+                return result;
+            }
+
+            outputTS = proposedTS;
+            dataset = fileFormat.getDataset();
+            while (convertedDset->card() > 0) {
+                DcmElement* elem = OFstatic_cast(DcmElement*, convertedDset->remove(OFstatic_cast(unsigned long, 0)));
+                if (elem) dataset->insert(elem, OFTrue);
+            }
+            delete convertedDset;
+
+            // Decompress for maximum compatibility
+            {
+                DJDecoderRegistration::registerCodecs();
+                OFCondition decStatus = dataset->chooseRepresentation(EXS_LittleEndianExplicit, NULL);
+                if (decStatus.good() && dataset->canWriteXfer(EXS_LittleEndianExplicit)) {
+                    outputTS = EXS_LittleEndianExplicit;
+                    OFString photometric;
+                    dataset->findAndGetOFStringArray(DCM_PhotometricInterpretation, photometric);
+                    if (photometric == "YBR_FULL_422" || photometric == "YBR_FULL") {
+                        dataset->putAndInsertOFStringArray(DCM_PhotometricInterpretation, "RGB");
+                    }
+                    dataset->findAndDeleteElement(DCM_LossyImageCompression, OFFalse);
+                    dataset->findAndDeleteElement(DCM_LossyImageCompressionRatio, OFFalse);
+                    dataset->findAndDeleteElement(DCM_LossyImageCompressionMethod, OFFalse);
+                }
+                DJDecoderRegistration::cleanup();
+            }
+        } else {
+            result->error_message = strdup("Unsupported image format. Use JPEG or BMP.");
+            return result;
+        }
+
+        // Set DICOM metadata
+        dataset->putAndInsertOFStringArray(DCM_SpecificCharacterSet, "ISO_IR 100");
+        dataset->putAndInsertOFStringArray(DCM_PatientID, (patient_id && strlen(patient_id) > 0) ? patient_id : "EXPORT");
+        dataset->putAndInsertOFStringArray(DCM_PatientName, (patient_name && strlen(patient_name) > 0) ? patient_name : "Exported");
+        dataset->putAndInsertOFStringArray(DCM_PatientBirthDate, (patient_birth_date && strlen(patient_birth_date) > 0) ? patient_birth_date : "");
+        dataset->putAndInsertOFStringArray(DCM_PatientSex, "");
+
+        dataset->putAndInsertOFStringArray(DCM_StudyInstanceUID, studyUID);
+        OFString curDate, curTime;
+        DcmDate::getCurrentDate(curDate);
+        DcmTime::getCurrentTime(curTime);
+        dataset->putAndInsertOFStringArray(DCM_StudyDate, curDate.c_str());
+        dataset->putAndInsertOFStringArray(DCM_StudyTime, curTime.c_str());
+        dataset->putAndInsertOFStringArray(DCM_StudyDescription, study_description ? study_description : "Exported Image");
+        dataset->putAndInsertOFStringArray(DCM_AccessionNumber, "");
+        dataset->putAndInsertOFStringArray(DCM_StudyID, "1");
+        dataset->putAndInsertOFStringArray(DCM_ReferringPhysicianName, "");
+
+        dataset->putAndInsertOFStringArray(DCM_SeriesInstanceUID, seriesUID);
+        dataset->putAndInsertOFStringArray(DCM_SeriesNumber, "1");
+        dataset->putAndInsertOFStringArray(DCM_SeriesDescription, series_description ? series_description : "Exported Series");
+        dataset->putAndInsertOFStringArray(DCM_Modality, (modality && strlen(modality) > 0) ? modality : "SC");
+
+        dataset->putAndInsertOFStringArray(DCM_SOPInstanceUID, sopUID);
+        dataset->putAndInsertOFStringArray(DCM_SOPClassUID, sopClassUID);
+        char instNumStr[16];
+        snprintf(instNumStr, sizeof(instNumStr), "%d", instance_number > 0 ? instance_number : 1);
+        dataset->putAndInsertOFStringArray(DCM_InstanceNumber, instNumStr);
+        dataset->putAndInsertOFStringArray(DCM_ContentDate, curDate.c_str());
+        dataset->putAndInsertOFStringArray(DCM_ContentTime, curTime.c_str());
+        dataset->putAndInsertOFStringArray(DCM_ConversionType, "WSD");
+        dataset->putAndInsertOFStringArray(DCM_Manufacturer, "MedView");
+        dataset->putAndInsertOFStringArray(DCM_ImageType, "DERIVED\\SECONDARY");
+        dataset->putAndInsertOFStringArray(DCM_PatientOrientation, "");
+        dataset->putAndInsertOFStringArray(DCM_BurnedInAnnotation, "YES");
+
+        if (image_comments && strlen(image_comments) > 0) {
+            dataset->putAndInsertOFStringArray(DCM_ImageComments, image_comments);
+        }
+
+        // Save file meta header
+        fileFormat.getMetaInfo()->putAndInsertOFStringArray(DCM_MediaStorageSOPClassUID, sopClassUID);
+        fileFormat.getMetaInfo()->putAndInsertOFStringArray(DCM_MediaStorageSOPInstanceUID, sopUID);
+
+        OFCondition saveStatus = fileFormat.saveFile(output_path, outputTS);
+        if (saveStatus.bad()) {
+            result->error_message = strdup(("Failed to save DICOM file: " + std::string(saveStatus.text())).c_str());
+            return result;
+        }
+
+        result->success = 1;
+        result->study_instance_uid = strdup(studyUID);
+        result->series_instance_uid = strdup(seriesUID);
+        result->sop_instance_uid = strdup(sopUID);
+        DEBUG_LOG("DICOM file saved: %s (SOP UID = %s)", output_path, sopUID);
+
+    } catch (const std::exception& e) {
+        result->error_message = strdup(("Exception during image-to-DICOM conversion: " + std::string(e.what())).c_str());
+    }
+
+    return result;
+}
+
 // Upload multiple images as a single multi-frame DICOM instance
 MediaUploadResult* dcmtk_upload_multiframe(const char* server_host, int server_port,
     const char* ae_title, const char* called_ae_title, const char* patient_id,
