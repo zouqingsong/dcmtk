@@ -1955,6 +1955,507 @@ MediaUploadResult* dcmtk_convert_image_to_dicom(const char* image_path, const ch
     return result;
 }
 
+// ============================================================================
+// GSPS (Grayscale Softcopy Presentation State) Creation
+// ============================================================================
+// Creates a GSPS DICOM file from annotation data.
+// Annotations are passed as a JSON string with the following structure:
+// [
+//   {"tool":0, "color":"#FF0000", "strokeWidth":2.0, "points":[[x1,y1],[x2,y2],...], "text":"optional"},
+//   ...
+// ]
+// tool values: 0=freehand, 1=line, 2=arrow, 3=rectangle, 4=circle,
+//              5=text, 6=ruler, 7=angle, 8=measureCircle
+// Points are in image pixel coordinates (column, row).
+MediaUploadResult* dcmtk_create_gsps(const char* source_dicom_path,
+                                      const char* annotations_json,
+                                      const char* output_path) {
+    DEBUG_LOG("Creating GSPS from %s with annotations -> %s",
+              source_dicom_path ? source_dicom_path : "NULL",
+              output_path ? output_path : "NULL");
+
+    MediaUploadResult* result = (MediaUploadResult*)malloc(sizeof(MediaUploadResult));
+    result->success = 0;
+    result->error_message = nullptr;
+    result->study_instance_uid = nullptr;
+    result->series_instance_uid = nullptr;
+    result->sop_instance_uid = nullptr;
+    result->rsp_status_code = 0;
+
+    if (!source_dicom_path || !annotations_json || !output_path) {
+        result->error_message = strdup("source_dicom_path, annotations_json, and output_path are required");
+        return result;
+    }
+
+    try {
+        // 1. Load source DICOM to extract patient/study/series/image info
+        DcmFileFormat sourceFF;
+        OFCondition cond = sourceFF.loadFile(source_dicom_path);
+        if (cond.bad()) {
+            result->error_message = strdup(("Failed to load source DICOM: " + std::string(cond.text())).c_str());
+            return result;
+        }
+        DcmDataset* srcDS = sourceFF.getDataset();
+
+        // Extract required UIDs and patient info from source
+        OFString srcSOPClassUID, srcSOPInstanceUID, srcStudyUID, srcSeriesUID;
+        OFString patientName, patientID, patientBirthDate, patientSex;
+        OFString studyDate, studyTime, studyDescription, accessionNumber;
+        OFString referringPhysician, studyID;
+        Uint16 rows = 0, columns = 0;
+
+        srcDS->findAndGetOFString(DCM_SOPClassUID, srcSOPClassUID);
+        srcDS->findAndGetOFString(DCM_SOPInstanceUID, srcSOPInstanceUID);
+        srcDS->findAndGetOFString(DCM_StudyInstanceUID, srcStudyUID);
+        srcDS->findAndGetOFString(DCM_SeriesInstanceUID, srcSeriesUID);
+        srcDS->findAndGetOFString(DCM_PatientName, patientName);
+        srcDS->findAndGetOFString(DCM_PatientID, patientID);
+        srcDS->findAndGetOFString(DCM_PatientBirthDate, patientBirthDate);
+        srcDS->findAndGetOFString(DCM_PatientSex, patientSex);
+        srcDS->findAndGetOFString(DCM_StudyDate, studyDate);
+        srcDS->findAndGetOFString(DCM_StudyTime, studyTime);
+        srcDS->findAndGetOFString(DCM_StudyDescription, studyDescription);
+        srcDS->findAndGetOFString(DCM_AccessionNumber, accessionNumber);
+        srcDS->findAndGetOFString(DCM_ReferringPhysicianName, referringPhysician);
+        srcDS->findAndGetOFString(DCM_StudyID, studyID);
+        srcDS->findAndGetUint16(DCM_Rows, rows);
+        srcDS->findAndGetUint16(DCM_Columns, columns);
+
+        if (srcSOPInstanceUID.empty() || srcStudyUID.empty()) {
+            result->error_message = strdup("Source DICOM missing required UIDs");
+            return result;
+        }
+        if (rows == 0 || columns == 0) {
+            rows = 512; columns = 512; // fallback
+        }
+
+        // 2. Generate UIDs for the GSPS object
+        char gspsSeriesUID[100], gspsSopUID[100];
+        dcmGenerateUniqueIdentifier(gspsSeriesUID, SITE_SERIES_UID_ROOT);
+        dcmGenerateUniqueIdentifier(gspsSopUID, SITE_INSTANCE_UID_ROOT);
+
+        // 3. Create GSPS DICOM file
+        DcmFileFormat gspsFF;
+        DcmDataset* ds = gspsFF.getDataset();
+
+        // --- Patient Module (copied from source) ---
+        ds->putAndInsertOFStringArray(DCM_PatientName, patientName);
+        ds->putAndInsertOFStringArray(DCM_PatientID, patientID);
+        ds->putAndInsertOFStringArray(DCM_PatientBirthDate, patientBirthDate);
+        ds->putAndInsertOFStringArray(DCM_PatientSex, patientSex);
+
+        // --- General Study Module (copied from source) ---
+        ds->putAndInsertOFStringArray(DCM_StudyInstanceUID, srcStudyUID);
+        ds->putAndInsertOFStringArray(DCM_StudyDate, studyDate);
+        ds->putAndInsertOFStringArray(DCM_StudyTime, studyTime);
+        ds->putAndInsertOFStringArray(DCM_StudyDescription, studyDescription);
+        ds->putAndInsertOFStringArray(DCM_AccessionNumber, accessionNumber);
+        ds->putAndInsertOFStringArray(DCM_ReferringPhysicianName, referringPhysician);
+        ds->putAndInsertOFStringArray(DCM_StudyID, studyID);
+
+        // --- General Series Module ---
+        ds->putAndInsertOFStringArray(DCM_Modality, "PR"); // Presentation State
+        ds->putAndInsertOFStringArray(DCM_SeriesInstanceUID, OFString(gspsSeriesUID));
+        ds->putAndInsertOFStringArray(DCM_SeriesNumber, "9999");
+        ds->putAndInsertOFStringArray(DCM_SeriesDescription, "MedView Annotations");
+
+        // --- SOP Common Module ---
+        ds->putAndInsertOFStringArray(DCM_SOPClassUID, UID_GrayscaleSoftcopyPresentationStateStorage);
+        ds->putAndInsertOFStringArray(DCM_SOPInstanceUID, OFString(gspsSopUID));
+        ds->putAndInsertOFStringArray(DCM_InstanceNumber, "1");
+
+        // --- Presentation State Module ---
+        // Content Label/Description
+        ds->putAndInsertOFStringArray(DCM_ContentLabel, "MEDVIEW_ANN");
+        ds->putAndInsertOFStringArray(DCM_ContentDescription, "MedView Annotations");
+
+        // Creation date/time
+        OFString dateStr, timeStr;
+        DcmDate::getCurrentDate(dateStr);
+        DcmTime::getCurrentTime(timeStr);
+        ds->putAndInsertOFStringArray(DCM_PresentationCreationDate, dateStr);
+        ds->putAndInsertOFStringArray(DCM_PresentationCreationTime, timeStr);
+        ds->putAndInsertOFStringArray(DCM_ContentDate, dateStr);
+        ds->putAndInsertOFStringArray(DCM_ContentTime, timeStr);
+        ds->putAndInsertOFStringArray(DCM_InstanceCreationDate, dateStr);
+        ds->putAndInsertOFStringArray(DCM_InstanceCreationTime, timeStr);
+
+        // --- Referenced Series Sequence ---
+        DcmItem* refSeriesItem = nullptr;
+        ds->findOrCreateSequenceItem(DCM_ReferencedSeriesSequence, refSeriesItem, 0);
+        if (refSeriesItem) {
+            refSeriesItem->putAndInsertOFStringArray(DCM_SeriesInstanceUID, srcSeriesUID);
+            DcmItem* refImageItem = nullptr;
+            refSeriesItem->findOrCreateSequenceItem(DCM_ReferencedImageSequence, refImageItem, 0);
+            if (refImageItem) {
+                refImageItem->putAndInsertOFStringArray(DCM_ReferencedSOPClassUID, srcSOPClassUID);
+                refImageItem->putAndInsertOFStringArray(DCM_ReferencedSOPInstanceUID, srcSOPInstanceUID);
+            }
+        }
+
+        // --- Displayed Area Selection Sequence ---
+        DcmItem* displayAreaItem = nullptr;
+        ds->findOrCreateSequenceItem(DCM_DisplayedAreaSelectionSequence, displayAreaItem, 0);
+        if (displayAreaItem) {
+            // Reference same image
+            DcmItem* daRefImage = nullptr;
+            displayAreaItem->findOrCreateSequenceItem(DCM_ReferencedImageSequence, daRefImage, 0);
+            if (daRefImage) {
+                daRefImage->putAndInsertOFStringArray(DCM_ReferencedSOPClassUID, srcSOPClassUID);
+                daRefImage->putAndInsertOFStringArray(DCM_ReferencedSOPInstanceUID, srcSOPInstanceUID);
+            }
+            // Displayed area: full image
+            Sint32 tlhc[2] = {1, 1};
+            Sint32 brhc[2] = {(Sint32)columns, (Sint32)rows};
+            displayAreaItem->putAndInsertSint32Array(DCM_DisplayedAreaTopLeftHandCorner, tlhc, 2);
+            displayAreaItem->putAndInsertSint32Array(DCM_DisplayedAreaBottomRightHandCorner, brhc, 2);
+            displayAreaItem->putAndInsertOFStringArray(DCM_PresentationSizeMode, "SCALE TO FIT");
+        }
+
+        // --- Graphic Layer Sequence ---
+        DcmItem* layerItem = nullptr;
+        ds->findOrCreateSequenceItem(DCM_GraphicLayerSequence, layerItem, 0);
+        if (layerItem) {
+            layerItem->putAndInsertOFStringArray(DCM_GraphicLayer, "ANNOTATIONS");
+            layerItem->putAndInsertSint32(DCM_GraphicLayerOrder, 1);
+            layerItem->putAndInsertOFStringArray(DCM_GraphicLayerDescription, "MedView annotations");
+        }
+
+        // 4. Parse annotation JSON and build Graphic Annotation Sequence
+        // Simple JSON parser for our known format
+        int graphicIdx = 0;
+        int textIdx = 0;
+        DcmItem* annotItem = nullptr;
+        ds->findOrCreateSequenceItem(DCM_GraphicAnnotationSequence, annotItem, 0);
+        if (annotItem) {
+            // Reference image
+            DcmItem* annRefImage = nullptr;
+            annotItem->findOrCreateSequenceItem(DCM_ReferencedImageSequence, annRefImage, 0);
+            if (annRefImage) {
+                annRefImage->putAndInsertOFStringArray(DCM_ReferencedSOPClassUID, srcSOPClassUID);
+                annRefImage->putAndInsertOFStringArray(DCM_ReferencedSOPInstanceUID, srcSOPInstanceUID);
+            }
+            annotItem->putAndInsertOFStringArray(DCM_GraphicLayer, "ANNOTATIONS");
+
+            // Parse annotations from JSON
+            std::string json(annotations_json);
+
+            // Find each annotation object {...}
+            size_t pos = 0;
+            while (pos < json.size()) {
+                size_t objStart = json.find('{', pos);
+                if (objStart == std::string::npos) break;
+
+                // Find matching closing brace
+                int braceCount = 1;
+                size_t objEnd = objStart + 1;
+                while (objEnd < json.size() && braceCount > 0) {
+                    if (json[objEnd] == '{') braceCount++;
+                    else if (json[objEnd] == '}') braceCount--;
+                    objEnd++;
+                }
+                std::string obj = json.substr(objStart, objEnd - objStart);
+
+                // Parse tool type
+                int toolType = -1;
+                size_t toolPos = obj.find("\"tool\":");
+                if (toolPos != std::string::npos) {
+                    toolType = atoi(obj.c_str() + toolPos + 7);
+                }
+
+                // Parse points array
+                std::vector<double> pointCoords;
+                size_t ptsStart = obj.find("\"points\":[");
+                if (ptsStart != std::string::npos) {
+                    size_t ptsInner = ptsStart + 10;
+                    // Find all [x,y] pairs
+                    while (ptsInner < obj.size()) {
+                        size_t pairStart = obj.find('[', ptsInner);
+                        if (pairStart == std::string::npos || pairStart >= obj.size()) break;
+                        // Check if we've gone past the points array
+                        // (look for ]] which ends the points array)
+                        size_t pairEnd = obj.find(']', pairStart + 1);
+                        if (pairEnd == std::string::npos) break;
+
+                        std::string pair = obj.substr(pairStart + 1, pairEnd - pairStart - 1);
+                        size_t comma = pair.find(',');
+                        if (comma != std::string::npos) {
+                            double x = atof(pair.substr(0, comma).c_str());
+                            double y = atof(pair.substr(comma + 1).c_str());
+                            pointCoords.push_back(x); // column
+                            pointCoords.push_back(y); // row
+                        }
+                        ptsInner = pairEnd + 1;
+                        // Stop if next char after ] is ] (end of outer array)
+                        if (ptsInner < obj.size() && obj[ptsInner] == ']') break;
+                    }
+                }
+
+                // Parse text (for text annotations)
+                std::string textValue;
+                size_t textPos = obj.find("\"text\":\"");
+                if (textPos != std::string::npos) {
+                    size_t textStart = textPos + 8;
+                    size_t textEnd = obj.find('"', textStart);
+                    if (textEnd != std::string::npos) {
+                        textValue = obj.substr(textStart, textEnd - textStart);
+                    }
+                }
+
+                // Map tool to GSPS graphic type and create objects
+                // tool: 0=freehand, 1=line, 2=arrow, 3=rectangle, 4=circle,
+                //        5=text, 6=ruler, 7=angle, 8=measureCircle
+                if (toolType == 5 && !textValue.empty() && pointCoords.size() >= 2) {
+                    // TEXT annotation → Text Object
+                    DcmItem* textObjItem = nullptr;
+                    annotItem->findOrCreateSequenceItem(DCM_TextObjectSequence, textObjItem, textIdx);
+                    if (textObjItem) {
+                        textObjItem->putAndInsertOFStringArray(DCM_UnformattedTextValue, textValue.c_str());
+                        // Anchor point (column, row)
+                        OFString anchorStr;
+                        anchorStr = OFString(std::to_string(pointCoords[0]).c_str()) + "\\" +
+                                    OFString(std::to_string(pointCoords[1]).c_str());
+                        textObjItem->putAndInsertOFStringArray(DCM_AnchorPoint, anchorStr);
+                        textObjItem->putAndInsertOFStringArray(DCM_AnchorPointVisibility, "Y");
+                        textObjItem->putAndInsertOFStringArray(DCM_AnchorPointAnnotationUnits, "PIXEL");
+                    }
+                    textIdx++;
+                } else if (pointCoords.size() >= 4) {
+                    // Graphic object
+                    DcmItem* graphicObjItem = nullptr;
+                    annotItem->findOrCreateSequenceItem(DCM_GraphicObjectSequence, graphicObjItem, graphicIdx);
+                    if (graphicObjItem) {
+                        graphicObjItem->putAndInsertOFStringArray(DCM_GraphicAnnotationUnits, "PIXEL");
+                        graphicObjItem->putAndInsertUint16(DCM_GraphicDimensions, 2);
+                        graphicObjItem->putAndInsertOFStringArray(DCM_GraphicFilled, "N");
+
+                        // Build point data string and determine graphic type
+                        std::string graphicType;
+                        std::vector<double> finalPoints = pointCoords;
+
+                        switch (toolType) {
+                            case 0: // freehand → POLYLINE
+                                graphicType = "POLYLINE";
+                                break;
+                            case 1: // line → POLYLINE (2 points)
+                            case 2: // arrow → POLYLINE (2 points; GSPS has no arrow type)
+                            case 6: // ruler → POLYLINE (2 points)
+                                graphicType = "POLYLINE";
+                                break;
+                            case 7: // angle → POLYLINE (3 points)
+                                graphicType = "POLYLINE";
+                                break;
+                            case 3: // rectangle → POLYLINE (4 corners, closed)
+                                if (pointCoords.size() == 4) {
+                                    // We have top-left and bottom-right, expand to 5 points (closed rect)
+                                    double x1 = pointCoords[0], y1 = pointCoords[1];
+                                    double x2 = pointCoords[2], y2 = pointCoords[3];
+                                    finalPoints.clear();
+                                    finalPoints.push_back(x1); finalPoints.push_back(y1); // TL
+                                    finalPoints.push_back(x2); finalPoints.push_back(y1); // TR
+                                    finalPoints.push_back(x2); finalPoints.push_back(y2); // BR
+                                    finalPoints.push_back(x1); finalPoints.push_back(y2); // BL
+                                    finalPoints.push_back(x1); finalPoints.push_back(y1); // close
+                                }
+                                graphicType = "POLYLINE";
+                                break;
+                            case 4: // circle → CIRCLE (center + edge point)
+                            case 8: // measureCircle → CIRCLE
+                                if (pointCoords.size() >= 4) {
+                                    // points[0,1] = center, points[2,3] = edge
+                                    finalPoints.clear();
+                                    finalPoints.push_back(pointCoords[0]); finalPoints.push_back(pointCoords[1]);
+                                    finalPoints.push_back(pointCoords[2]); finalPoints.push_back(pointCoords[3]);
+                                }
+                                graphicType = "CIRCLE";
+                                break;
+                            default:
+                                graphicType = "POLYLINE";
+                                break;
+                        }
+
+                        int numPoints = (int)(finalPoints.size() / 2);
+                        graphicObjItem->putAndInsertUint16(DCM_NumberOfGraphicPoints, numPoints);
+                        graphicObjItem->putAndInsertOFStringArray(DCM_GraphicType, graphicType.c_str());
+
+                        // Write point data as float array
+                        Float32* pointData = new Float32[finalPoints.size()];
+                        for (size_t i = 0; i < finalPoints.size(); i++) {
+                            pointData[i] = (Float32)finalPoints[i];
+                        }
+                        graphicObjItem->putAndInsertFloat32Array(DCM_GraphicData, pointData, (unsigned long)finalPoints.size());
+                        delete[] pointData;
+                    }
+                    graphicIdx++;
+                }
+
+                pos = objEnd;
+            }
+        }
+
+        // --- Meta Information ---
+        gspsFF.getMetaInfo()->putAndInsertOFStringArray(DCM_MediaStorageSOPClassUID,
+            UID_GrayscaleSoftcopyPresentationStateStorage);
+        gspsFF.getMetaInfo()->putAndInsertOFStringArray(DCM_MediaStorageSOPInstanceUID,
+            OFString(gspsSopUID));
+        gspsFF.getMetaInfo()->putAndInsertOFStringArray(DCM_TransferSyntaxUID,
+            UID_LittleEndianExplicitTransferSyntax);
+
+        // 5. Save the GSPS file
+        cond = gspsFF.saveFile(output_path, EXS_LittleEndianExplicit);
+        if (cond.bad()) {
+            result->error_message = strdup(("Failed to save GSPS file: " + std::string(cond.text())).c_str());
+            return result;
+        }
+
+        result->success = 1;
+        result->study_instance_uid = strdup(srcStudyUID.c_str());
+        result->series_instance_uid = strdup(gspsSeriesUID);
+        result->sop_instance_uid = strdup(gspsSopUID);
+        DEBUG_LOG("GSPS file created: %s (SOP UID = %s, %d graphics, %d texts)",
+                  output_path, gspsSopUID, graphicIdx, textIdx);
+
+    } catch (const std::exception& e) {
+        result->error_message = strdup(("Exception during GSPS creation: " + std::string(e.what())).c_str());
+    }
+
+    return result;
+}
+
+// ============================================================================
+// GSPS Parser — extract annotations from a GSPS DICOM file as JSON
+// ============================================================================
+// Returns a malloc'd JSON string:
+// {
+//   "sopClassUID": "...",
+//   "referencedSOPInstanceUID": "...",
+//   "referencedSeriesInstanceUID": "...",
+//   "annotations": [
+//     {"type":"POLYLINE","points":[[x,y],...]},
+//     {"type":"CIRCLE","points":[[cx,cy],[ex,ey]]},
+//     {"type":"TEXT","text":"...","anchor":[x,y]},
+//     ...
+//   ]
+// }
+// Returns NULL on error or if file is not a GSPS.
+char* dcmtk_parse_gsps(const char* gsps_file_path) {
+    if (!gsps_file_path) return nullptr;
+
+    DcmFileFormat fileFormat;
+    OFCondition cond = fileFormat.loadFile(gsps_file_path);
+    if (cond.bad()) return nullptr;
+
+    DcmDataset* ds = fileFormat.getDataset();
+
+    // Verify this is a GSPS
+    OFString sopClassUID;
+    ds->findAndGetOFString(DCM_SOPClassUID, sopClassUID);
+    if (sopClassUID != UID_GrayscaleSoftcopyPresentationStateStorage) {
+        return nullptr; // Not a GSPS
+    }
+
+    // Extract referenced image info from Referenced Series Sequence
+    OFString refSOPInstanceUID, refSeriesInstanceUID;
+    DcmItem* refSeriesItem = nullptr;
+    if (ds->findAndGetSequenceItem(DCM_ReferencedSeriesSequence, refSeriesItem, 0).good() && refSeriesItem) {
+        refSeriesItem->findAndGetOFString(DCM_SeriesInstanceUID, refSeriesInstanceUID);
+        DcmItem* refImageItem = nullptr;
+        if (refSeriesItem->findAndGetSequenceItem(DCM_ReferencedImageSequence, refImageItem, 0).good() && refImageItem) {
+            refImageItem->findAndGetOFString(DCM_ReferencedSOPInstanceUID, refSOPInstanceUID);
+        }
+    }
+
+    // Extract creation date/time
+    OFString creationDate, creationTime;
+    ds->findAndGetOFString(DCM_PresentationCreationDate, creationDate);
+    ds->findAndGetOFString(DCM_PresentationCreationTime, creationTime);
+
+    // Build JSON output
+    std::ostringstream json;
+    json << "{";
+    json << "\"sopClassUID\":\"" << sopClassUID.c_str() << "\",";
+    json << "\"referencedSOPInstanceUID\":\"" << refSOPInstanceUID.c_str() << "\",";
+    json << "\"referencedSeriesInstanceUID\":\"" << refSeriesInstanceUID.c_str() << "\",";
+    json << "\"creationDate\":\"" << creationDate.c_str() << "\",";
+    json << "\"creationTime\":\"" << creationTime.c_str() << "\",";
+    json << "\"annotations\":[";
+
+    bool firstAnnotation = true;
+
+    // Parse Graphic Annotation Sequence
+    DcmItem* annotItem = nullptr;
+    if (ds->findAndGetSequenceItem(DCM_GraphicAnnotationSequence, annotItem, 0).good() && annotItem) {
+        // Parse Graphic Objects
+        int idx = 0;
+        DcmItem* graphicObj = nullptr;
+        while (annotItem->findAndGetSequenceItem(DCM_GraphicObjectSequence, graphicObj, idx).good() && graphicObj) {
+            OFString graphicType;
+            graphicObj->findAndGetOFString(DCM_GraphicType, graphicType);
+
+            Uint16 numPoints = 0;
+            graphicObj->findAndGetUint16(DCM_NumberOfGraphicPoints, numPoints);
+
+            // Read graphic data (Float32 array: x1,y1,x2,y2,...)
+            const Float32* pointData = nullptr;
+            unsigned long pointCount = 0;
+            graphicObj->findAndGetFloat32Array(DCM_GraphicData, pointData, &pointCount);
+
+            if (pointData && pointCount >= 4) {
+                if (!firstAnnotation) json << ",";
+                firstAnnotation = false;
+
+                json << "{\"type\":\"" << graphicType.c_str() << "\",\"points\":[";
+                for (unsigned long i = 0; i + 1 < pointCount; i += 2) {
+                    if (i > 0) json << ",";
+                    json << "[" << pointData[i] << "," << pointData[i + 1] << "]";
+                }
+                json << "]}";
+            }
+            idx++;
+        }
+
+        // Parse Text Objects
+        idx = 0;
+        DcmItem* textObj = nullptr;
+        while (annotItem->findAndGetSequenceItem(DCM_TextObjectSequence, textObj, idx).good() && textObj) {
+            OFString textValue, anchorStr;
+            textObj->findAndGetOFString(DCM_UnformattedTextValue, textValue);
+            textObj->findAndGetOFString(DCM_AnchorPoint, anchorStr);
+
+            if (!textValue.empty()) {
+                if (!firstAnnotation) json << ",";
+                firstAnnotation = false;
+
+                // Parse anchor point "x\\y"
+                double ax = 0, ay = 0;
+                std::string aStr(anchorStr.c_str());
+                size_t sep = aStr.find('\\');
+                if (sep != std::string::npos) {
+                    ax = atof(aStr.substr(0, sep).c_str());
+                    ay = atof(aStr.substr(sep + 1).c_str());
+                }
+
+                // Escape text for JSON
+                std::string escapedText;
+                for (char c : std::string(textValue.c_str())) {
+                    if (c == '"') escapedText += "\\\"";
+                    else if (c == '\\') escapedText += "\\\\";
+                    else if (c == '\n') escapedText += "\\n";
+                    else escapedText += c;
+                }
+
+                json << "{\"type\":\"TEXT\",\"text\":\"" << escapedText
+                     << "\",\"anchor\":[" << ax << "," << ay << "]}";
+            }
+            idx++;
+        }
+    }
+
+    json << "]}";
+
+    return strdup(json.str().c_str());
+}
+
 // Upload multiple images as a single multi-frame DICOM instance
 MediaUploadResult* dcmtk_upload_multiframe(const char* server_host, int server_port,
     const char* ae_title, const char* called_ae_title, const char* patient_id,
@@ -4377,6 +4878,146 @@ void dcmtk_free_mpr_slice_data(MprSliceData* data) {
         if (data->error_message) free(data->error_message);
         free(data);
     }
+}
+
+// ============================================================
+// 3D Maximum Intensity Projection (MIP) Rendering
+// ============================================================
+
+MprSliceData* dcmtk_render_mip(int volume_id, double rotation_x_deg, double rotation_y_deg,
+                                double window_center, double window_width) {
+    MprSliceData* result = (MprSliceData*)calloc(1, sizeof(MprSliceData));
+
+    auto it = g_volumes.find(volume_id);
+    if (it == g_volumes.end()) {
+        result->error = 1;
+        result->error_message = strdup("Volume not found");
+        return result;
+    }
+
+    MprVolume* vol = it->second;
+    int W = vol->width;
+    int H = vol->height;
+    int D = vol->depth;
+
+    double wc = (window_width > 0) ? window_center : vol->windowCenter;
+    double ww = (window_width > 0) ? window_width : vol->windowWidth;
+
+    // Convert degrees to radians
+    double rx = rotation_x_deg * M_PI / 180.0;
+    double ry = rotation_y_deg * M_PI / 180.0;
+
+    double cosRx = cos(rx), sinRx = sin(rx);
+    double cosRy = cos(ry), sinRy = sin(ry);
+
+    // Rotation matrix: Ry * Rx (Y-rotation then X-rotation)
+    // Forward direction (ray direction in volume space):
+    //   row0: [ cosRy,         sinRy*sinRx,    sinRy*cosRx  ]
+    //   row1: [ 0,             cosRx,         -sinRx        ]
+    //   row2: [-sinRy,         cosRy*sinRx,    cosRy*cosRx  ]
+    // We cast rays along the Z' axis of the rotated frame.
+    // The screen X' maps to rotated X, screen Y' maps to rotated Y.
+
+    // Screen basis vectors in volume voxel space
+    double screenX[3] = { cosRy,   sinRy * sinRx,  sinRy * cosRx };
+    double screenY[3] = { 0.0,     cosRx,         -sinRx          };
+    double rayDir[3]  = {-sinRy,   cosRy * sinRx,  cosRy * cosRx  };
+
+    // Account for anisotropic voxel spacing: scale volume coords
+    // so we work in mm space, then sample in voxel space.
+    double sx = vol->pixelSpacingX;  // mm per voxel in X
+    double sy = vol->pixelSpacingY;  // mm per voxel in Y
+    double sz = vol->sliceSpacing;   // mm per voxel in Z
+
+    // Physical extent of volume
+    double extentX = W * sx;
+    double extentY = H * sy;
+    double extentZ = D * sz;
+
+    // Bounding sphere radius in mm (for determining output size and ray range)
+    double halfDiag = 0.5 * sqrt(extentX * extentX + extentY * extentY + extentZ * extentZ);
+
+    // Output image: scale to roughly match the largest dimension
+    double maxDim = std::max({(double)W, (double)H, (double)D});
+    int outSize = (int)std::min(maxDim * 1.2, 512.0); // cap at 512 for performance
+    int outW = outSize;
+    int outH = outSize;
+
+    // Pixel spacing on screen (mm per output pixel)
+    double screenPixelSpacing = (2.0 * halfDiag) / outSize;
+
+    unsigned char* rgba = (unsigned char*)calloc(outW * outH * 4, 1);
+    if (!rgba) {
+        result->error = 1;
+        result->error_message = strdup("Failed to allocate MIP image memory");
+        return result;
+    }
+
+    // Volume center in voxel space
+    double cx = W * 0.5;
+    double cy = H * 0.5;
+    double cz = D * 0.5;
+
+    // Number of samples along each ray (diagonal of volume in voxels, oversampled)
+    double diagVoxels = sqrt((double)(W * W + H * H + D * D));
+    int numSamples = (int)(diagVoxels * 1.2);
+    if (numSamples < 64) numSamples = 64;
+    double stepSize = (2.0 * halfDiag) / numSamples; // mm per step
+
+    DEBUG_LOG("MIP render: vol %d, rot=(%.1f,%.1f), out=%dx%d, samples=%d",
+              volume_id, rotation_x_deg, rotation_y_deg, outW, outH, numSamples);
+
+    for (int py = 0; py < outH; py++) {
+        for (int px = 0; px < outW; px++) {
+            // Screen offset from center in mm
+            double offX = (px - outW * 0.5 + 0.5) * screenPixelSpacing;
+            double offY = (py - outH * 0.5 + 0.5) * screenPixelSpacing;
+
+            // Ray start in mm from volume center, then convert to voxel space
+            int16_t maxVal = -32768;
+
+            for (int s = 0; s < numSamples; s++) {
+                double t = (s - numSamples * 0.5 + 0.5) * stepSize;
+
+                // Position in mm relative to volume center
+                double mx = offX * screenX[0] + offY * screenY[0] + t * rayDir[0];
+                double my = offX * screenX[1] + offY * screenY[1] + t * rayDir[1];
+                double mz = offX * screenX[2] + offY * screenY[2] + t * rayDir[2];
+
+                // Convert mm to voxel coordinates
+                double vx = mx / sx + cx;
+                double vy = my / sy + cy;
+                double vz = mz / sz + cz;
+
+                // Bounds check (nearest-neighbor sampling)
+                int ix = (int)(vx + 0.5);
+                int iy = (int)(vy + 0.5);
+                int iz = (int)(vz + 0.5);
+
+                if (ix < 0 || ix >= W || iy < 0 || iy >= H || iz < 0 || iz >= D)
+                    continue;
+
+                int16_t val = vol->data[(size_t)iz * W * H + iy * W + ix];
+                if (val > maxVal) maxVal = val;
+            }
+
+            uint8_t gray = applyMprWindow(maxVal, wc, ww);
+            int idx = (py * outW + px) * 4;
+            rgba[idx]     = gray;
+            rgba[idx + 1] = gray;
+            rgba[idx + 2] = gray;
+            rgba[idx + 3] = 255;
+        }
+    }
+
+    result->data = rgba;
+    result->width = outW;
+    result->height = outH;
+    result->error = 0;
+    result->error_message = nullptr;
+
+    DEBUG_LOG("MIP render complete: %dx%d", outW, outH);
+    return result;
 }
 
 }

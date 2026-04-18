@@ -126,6 +126,8 @@ extern "C" {
     MediaUploadResult* dcmtk_upload_multiframe(const char* server_host, int server_port, const char* ae_title, const char* called_ae_title, const char* patient_id, const char** image_paths, int image_count, const char* patient_name, const char* patient_birth_date, const char* study_description, const char* series_description, const char* image_comments, const char* modality, const char* study_instance_uid, const char* series_instance_uid);
     MediaUploadResult* dcmtk_upload_video(const char* server_host, int server_port, const char* ae_title, const char* called_ae_title, const char* patient_id, const char* video_path, const char* patient_name, const char* patient_birth_date, const char* study_description, const char* series_description, const char* image_comments, const char* modality);
     MediaUploadResult* dcmtk_convert_image_to_dicom(const char* image_path, const char* output_path, const char* patient_id, const char* patient_name, const char* patient_birth_date, const char* study_description, const char* series_description, const char* image_comments, const char* modality, const char* study_instance_uid, const char* series_instance_uid, int instance_number);
+    MediaUploadResult* dcmtk_create_gsps(const char* source_dicom_path, const char* annotations_json, const char* output_path);
+    char* dcmtk_parse_gsps(const char* gsps_file_path);
     void dcmtk_free_query_result(DicomQueryResult* result);
     void dcmtk_free_study_query_result(DicomStudyQueryResult* result);
     void dcmtk_free_series_query_result(DicomSeriesQueryResult* result);
@@ -211,6 +213,8 @@ extern "C" {
     void dcmtk_free_mpr_volume(int volume_id);
     void dcmtk_free_mpr_volume_info(MprVolumeInfo* info);
     void dcmtk_free_mpr_slice_data(MprSliceData* data);
+    MprSliceData* dcmtk_render_mip(int volume_id, double rotation_x_deg, double rotation_y_deg,
+                                    double window_center, double window_width);
 #ifdef __cplusplus
 }
 #endif
@@ -579,6 +583,68 @@ extern "C" {
     dcmtk_free_patient_creation_result(creationResult);
     result(resultDict);
     
+  } else if ([@"createGsps" isEqualToString:call.method]) {
+    NSString* sourceDicomPath = call.arguments[@"sourceDicomPath"];
+    NSString* annotationsJson = call.arguments[@"annotationsJson"];
+    NSString* outputPath = call.arguments[@"outputPath"];
+
+    if (sourceDicomPath == nil || annotationsJson == nil || outputPath == nil) {
+      result([FlutterError errorWithCode:@"INVALID_ARGUMENT"
+                                 message:@"sourceDicomPath, annotationsJson, and outputPath are required"
+                                 details:nil]);
+      return;
+    }
+
+    NSString* sSrc = [sourceDicomPath copy];
+    NSString* sJson = [annotationsJson copy];
+    NSString* sOut = [outputPath copy];
+
+    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+      MediaUploadResult* gspsResult = dcmtk_create_gsps(
+        [sSrc UTF8String],
+        [sJson UTF8String],
+        [sOut UTF8String]
+      );
+
+      dispatch_async(dispatch_get_main_queue(), ^{
+        if (!gspsResult->success) {
+          NSString* errorMsg = gspsResult->error_message ?
+              [NSString stringWithUTF8String:gspsResult->error_message] : @"Unknown GSPS error";
+          result(@{@"success": @NO, @"error": errorMsg});
+        } else {
+          result(@{
+            @"success": @YES,
+            @"studyInstanceUID": gspsResult->study_instance_uid ? [NSString stringWithUTF8String:gspsResult->study_instance_uid] : @"",
+            @"seriesInstanceUID": gspsResult->series_instance_uid ? [NSString stringWithUTF8String:gspsResult->series_instance_uid] : @"",
+            @"sopInstanceUID": gspsResult->sop_instance_uid ? [NSString stringWithUTF8String:gspsResult->sop_instance_uid] : @"",
+            @"outputPath": sOut,
+          });
+        }
+        dcmtk_free_media_upload_result(gspsResult);
+      });
+    });
+
+  } else if ([@"parseGsps" isEqualToString:call.method]) {
+    NSString* filePath = call.arguments[@"filePath"];
+    if (filePath == nil) {
+      result([FlutterError errorWithCode:@"INVALID_ARGUMENT"
+                                 message:@"filePath is required"
+                                 details:nil]);
+      return;
+    }
+    NSString* sPath = [filePath copy];
+    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+      char* jsonStr = dcmtk_parse_gsps([sPath UTF8String]);
+      dispatch_async(dispatch_get_main_queue(), ^{
+        if (jsonStr) {
+          result([NSString stringWithUTF8String:jsonStr]);
+          free(jsonStr);
+        } else {
+          result([NSNull null]);
+        }
+      });
+    });
+
   } else if ([@"convertImageToDicom" isEqualToString:call.method]) {
     NSString* imagePath = call.arguments[@"imagePath"];
     NSString* outputPath = call.arguments[@"outputPath"];
@@ -1246,6 +1312,47 @@ extern "C" {
       dcmtk_free_mpr_volume([volumeId intValue]);
     }
     result(nil);
+
+  } else if ([@"renderMip" isEqualToString:call.method]) {
+    NSNumber* volumeId = call.arguments[@"volumeId"];
+    NSNumber* rotationX = call.arguments[@"rotationX"];
+    NSNumber* rotationY = call.arguments[@"rotationY"];
+    NSNumber* windowCenter = call.arguments[@"windowCenter"];
+    NSNumber* windowWidth = call.arguments[@"windowWidth"];
+    if (volumeId == nil) {
+      result([FlutterError errorWithCode:@"INVALID_ARGUMENT"
+                                 message:@"volumeId is required"
+                                 details:nil]);
+      return;
+    }
+    int vid = [volumeId intValue];
+    double rx = rotationX ? [rotationX doubleValue] : 0;
+    double ry = rotationY ? [rotationY doubleValue] : 0;
+    double wc = windowCenter ? [windowCenter doubleValue] : 0;
+    double ww = windowWidth ? [windowWidth doubleValue] : 0;
+    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+      MprSliceData* mip = dcmtk_render_mip(vid, rx, ry, wc, ww);
+      dispatch_async(dispatch_get_main_queue(), ^{
+        if (mip->error) {
+          NSString* errMsg = mip->error_message ?
+              [NSString stringWithUTF8String:mip->error_message] : @"Unknown MIP error";
+          dcmtk_free_mpr_slice_data(mip);
+          result([FlutterError errorWithCode:@"MIP_ERROR" message:errMsg details:nil]);
+          return;
+        }
+        int dataLen = mip->width * mip->height * 4;
+        FlutterStandardTypedData* pixelData =
+            [FlutterStandardTypedData typedDataWithBytes:
+                [NSData dataWithBytes:mip->data length:dataLen]];
+        NSDictionary* dict = @{
+          @"width": @(mip->width),
+          @"height": @(mip->height),
+          @"data": pixelData,
+        };
+        dcmtk_free_mpr_slice_data(mip);
+        result(dict);
+      });
+    });
 
   } else {
     result(FlutterMethodNotImplemented);

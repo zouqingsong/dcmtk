@@ -269,6 +269,25 @@ void dcmtk_free_mpr_volume(int volume_id);
 void dcmtk_free_mpr_volume_info(MprVolumeInfo* info);
 void dcmtk_free_mpr_slice_data(MprSliceData* data);
 
+// === 3D Maximum Intensity Projection (MIP) ===
+// Render a MIP image from a loaded volume at given rotation angles.
+// rotation_x_deg/rotation_y_deg: rotation in degrees around X/Y axes.
+// Returns MprSliceData with RGBA output. Caller must free with dcmtk_free_mpr_slice_data().
+MprSliceData* dcmtk_render_mip(int volume_id, double rotation_x_deg, double rotation_y_deg,
+                                double window_center, double window_width);
+
+// === GSPS (Grayscale Softcopy Presentation State) ===
+// Create a GSPS DICOM file from annotation data on a source DICOM image.
+// annotations_json: JSON array of annotation objects (tool, points, text, color, strokeWidth).
+// Returns MediaUploadResult with success/error and generated UIDs.
+MediaUploadResult* dcmtk_create_gsps(const char* source_dicom_path,
+                                      const char* annotations_json,
+                                      const char* output_path);
+
+// Parse a GSPS DICOM file and return annotations as a JSON string.
+// Returns NULL if the file is not a GSPS or on error. Caller must free() the result.
+char* dcmtk_parse_gsps(const char* gsps_file_path);
+
 #ifdef __cplusplus
 }
 #endif

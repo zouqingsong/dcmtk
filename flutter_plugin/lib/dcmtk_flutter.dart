@@ -467,6 +467,54 @@ class DcmtkFlutter {
     }
   }
 
+  /// Create a GSPS (Grayscale Softcopy Presentation State) DICOM file
+  /// from annotation data on a source DICOM image.
+  /// [sourceDicomPath] - path to the original DICOM image being annotated
+  /// [annotationsJson] - JSON array of annotation objects
+  /// [outputPath] - where to save the .dcm GSPS file
+  /// Returns {success, studyInstanceUID, seriesInstanceUID, sopInstanceUID, outputPath}
+  Future<Map<String, dynamic>> createGsps({
+    required String sourceDicomPath,
+    required String annotationsJson,
+    required String outputPath,
+  }) async {
+    if (Platform.isIOS) {
+      try {
+        final dynamic result = await _methodChannel.invokeMethod('createGsps', {
+          'sourceDicomPath': sourceDicomPath,
+          'annotationsJson': annotationsJson,
+          'outputPath': outputPath,
+        });
+        return Map<String, dynamic>.from(result as Map);
+      } on PlatformException catch (e) {
+        return {'success': false, 'error': e.message};
+      }
+    } else if (Platform.isAndroid) {
+      return {'success': false, 'error': 'Not implemented for Android'};
+    } else {
+      return {'success': false, 'error': 'Platform not supported'};
+    }
+  }
+
+  /// Parse a GSPS DICOM file and return the annotations as a JSON string.
+  /// Returns null if the file is not a GSPS or on error.
+  /// The returned string is a JSON object with:
+  ///   referencedSOPInstanceUID, referencedSeriesInstanceUID,
+  ///   annotations: [{type, points, text, anchor}, ...]
+  Future<String?> parseGsps(String filePath) async {
+    if (Platform.isIOS) {
+      try {
+        final result = await _methodChannel.invokeMethod('parseGsps', {
+          'filePath': filePath,
+        });
+        return result as String?;
+      } on PlatformException {
+        return null;
+      }
+    }
+    return null;
+  }
+
   /// Convert a JPEG/BMP image to a DICOM Secondary Capture file (no network).
   /// Returns {success, studyInstanceUID, seriesInstanceUID, sopInstanceUID} or {success: false, error}.
   Future<Map<String, dynamic>> convertImageToDicom({
@@ -849,6 +897,31 @@ class DcmtkFlutter {
         'volumeId': volumeId,
       });
     }
+  }
+
+  /// Render a 3D Maximum Intensity Projection (MIP) from a loaded volume.
+  /// Returns a map with 'width', 'height', and 'data' (RGBA Uint8List),
+  /// or null on error.
+  Future<Map<String, dynamic>?> renderMip(
+    int volumeId, {
+    double rotationX = 0,
+    double rotationY = 0,
+    double windowCenter = 0,
+    double windowWidth = 0,
+  }) async {
+    if (Platform.isIOS) {
+      final result = await _methodChannel.invokeMethod<Map>('renderMip', {
+        'volumeId': volumeId,
+        'rotationX': rotationX,
+        'rotationY': rotationY,
+        'windowCenter': windowCenter,
+        'windowWidth': windowWidth,
+      });
+      if (result != null) {
+        return Map<String, dynamic>.from(result);
+      }
+    }
+    return null;
   }
 }
 
