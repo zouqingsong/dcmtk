@@ -915,32 +915,49 @@ extern "C" {
       return;
     }
     
-    MediaUploadResult* uploadResult = dcmtk_upload_video(
-      [serverHost UTF8String], [serverPort intValue], [aeTitle UTF8String], [calledAeTitle UTF8String],
-      [patientId UTF8String], [videoPath UTF8String],
-      patientName ? [patientName UTF8String] : "",
-      patientBirthDate ? [patientBirthDate UTF8String] : "",
-      studyDescription ? [studyDescription UTF8String] : "Uploaded Video",
-      seriesDescription ? [seriesDescription UTF8String] : "Uploaded Video Series",
-      imageComments ? [imageComments UTF8String] : "",
-      modality ? [modality UTF8String] : "SC");
+    NSString* sHost = [serverHost copy];
+    NSNumber* sPort = [serverPort copy];
+    NSString* sAe = [aeTitle copy];
+    NSString* sCalled = [calledAeTitle copy];
+    NSString* sPid = [patientId copy];
+    NSString* sVideo = [videoPath copy];
+    NSString* sPatientName = patientName ? [patientName copy] : nil;
+    NSString* sPatientBirthDate = patientBirthDate ? [patientBirthDate copy] : nil;
+    NSString* sStudyDesc = studyDescription ? [studyDescription copy] : nil;
+    NSString* sSeriesDesc = seriesDescription ? [seriesDescription copy] : nil;
+    NSString* sComments = imageComments ? [imageComments copy] : nil;
+    NSString* sModality = modality ? [modality copy] : nil;
     
-    if (!uploadResult->success) {
-      NSString* errorMsg = uploadResult->error_message ?
-          [NSString stringWithUTF8String:uploadResult->error_message] : @"Unknown upload error";
-      dcmtk_free_media_upload_result(uploadResult);
-      result([FlutterError errorWithCode:@"UPLOAD_ERROR" message:errorMsg details:nil]);
-      return;
-    }
-    
-    NSDictionary* resultDict = @{
-      @"success": @(uploadResult->success),
-      @"studyInstanceUID": uploadResult->study_instance_uid ? [NSString stringWithUTF8String:uploadResult->study_instance_uid] : @"",
-      @"seriesInstanceUID": uploadResult->series_instance_uid ? [NSString stringWithUTF8String:uploadResult->series_instance_uid] : @"",
-      @"sopInstanceUID": uploadResult->sop_instance_uid ? [NSString stringWithUTF8String:uploadResult->sop_instance_uid] : @""
-    };
-    dcmtk_free_media_upload_result(uploadResult);
-    result(resultDict);
+    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+      MediaUploadResult* uploadResult = dcmtk_upload_video(
+        [sHost UTF8String], [sPort intValue], [sAe UTF8String], [sCalled UTF8String],
+        [sPid UTF8String], [sVideo UTF8String],
+        sPatientName ? [sPatientName UTF8String] : "",
+        sPatientBirthDate ? [sPatientBirthDate UTF8String] : "",
+        sStudyDesc ? [sStudyDesc UTF8String] : "Uploaded Video",
+        sSeriesDesc ? [sSeriesDesc UTF8String] : "Uploaded Video Series",
+        sComments ? [sComments UTF8String] : "",
+        sModality ? [sModality UTF8String] : "SC");
+      
+      dispatch_async(dispatch_get_main_queue(), ^{
+        if (!uploadResult->success) {
+          NSString* errorMsg = uploadResult->error_message ?
+              [NSString stringWithUTF8String:uploadResult->error_message] : @"Unknown upload error";
+          dcmtk_free_media_upload_result(uploadResult);
+          result([FlutterError errorWithCode:@"UPLOAD_ERROR" message:errorMsg details:nil]);
+          return;
+        }
+        
+        NSDictionary* resultDict = @{
+          @"success": @(uploadResult->success),
+          @"studyInstanceUID": uploadResult->study_instance_uid ? [NSString stringWithUTF8String:uploadResult->study_instance_uid] : @"",
+          @"seriesInstanceUID": uploadResult->series_instance_uid ? [NSString stringWithUTF8String:uploadResult->series_instance_uid] : @"",
+          @"sopInstanceUID": uploadResult->sop_instance_uid ? [NSString stringWithUTF8String:uploadResult->sop_instance_uid] : @""
+        };
+        dcmtk_free_media_upload_result(uploadResult);
+        result(resultDict);
+      });
+    });
     
   } else if ([@"queryInstancesForSeries" isEqualToString:call.method]) {
     NSString* serverHost = call.arguments[@"serverHost"];
