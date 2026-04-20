@@ -2220,6 +2220,13 @@ MediaUploadResult* dcmtk_create_gsps(const char* source_dicom_path,
                     strokeWidth = atof(obj.c_str() + swPos + 14);
                 }
 
+                // Parse fontSize
+                double fontSize = 16.0;
+                size_t fsPos = obj.find("\"fontSize\":");
+                if (fsPos != std::string::npos) {
+                    fontSize = atof(obj.c_str() + fsPos + 11);
+                }
+
                 // Map tool to GSPS graphic type and create objects
                 // tool: 0=freehand, 1=line, 2=arrow, 3=rectangle, 4=circle,
                 //        5=text, 6=ruler, 7=angle, 8=measureCircle
@@ -2229,11 +2236,9 @@ MediaUploadResult* dcmtk_create_gsps(const char* source_dicom_path,
                     annotItem->findOrCreateSequenceItem(DCM_TextObjectSequence, textObjItem, textIdx);
                     if (textObjItem) {
                         textObjItem->putAndInsertOFStringArray(DCM_UnformattedTextValue, textValue.c_str());
-                        // Anchor point (column, row)
-                        OFString anchorStr;
-                        anchorStr = OFString(std::to_string(pointCoords[0]).c_str()) + "\\" +
-                                    OFString(std::to_string(pointCoords[1]).c_str());
-                        textObjItem->putAndInsertOFStringArray(DCM_AnchorPoint, anchorStr);
+                        // Anchor point (column, row) — AnchorPoint is VR=FL, use float array
+                        Float32 anchorPt[2] = { (Float32)pointCoords[0], (Float32)pointCoords[1] };
+                        textObjItem->putAndInsertFloat32Array(DCM_AnchorPoint, anchorPt, 2);
                         textObjItem->putAndInsertOFStringArray(DCM_AnchorPointVisibility, "Y");
                         textObjItem->putAndInsertOFStringArray(DCM_AnchorPointAnnotationUnits, "PIXEL");
                         // Store color/strokeWidth/tool as private tags
@@ -2244,6 +2249,8 @@ MediaUploadResult* dcmtk_create_gsps(const char* source_dicom_path,
                             std::to_string(strokeWidth).c_str());
                         textObjItem->putAndInsertOFStringArray(DcmTag(0x0071, 0x1012, EVR_LO),
                             std::to_string(toolType).c_str());
+                        textObjItem->putAndInsertOFStringArray(DcmTag(0x0071, 0x1013, EVR_LO),
+                            std::to_string(fontSize).c_str());
                     }
                     textIdx++;
                 } else if (pointCoords.size() >= 4) {
@@ -2320,6 +2327,8 @@ MediaUploadResult* dcmtk_create_gsps(const char* source_dicom_path,
                             std::to_string(strokeWidth).c_str());
                         graphicObjItem->putAndInsertOFStringArray(DcmTag(0x0071, 0x1012, EVR_LO),
                             std::to_string(toolType).c_str());
+                        graphicObjItem->putAndInsertOFStringArray(DcmTag(0x0071, 0x1013, EVR_LO),
+                            std::to_string(fontSize).c_str());
                     }
                     graphicIdx++;
                 }
@@ -2445,14 +2454,16 @@ char* dcmtk_parse_gsps(const char* gsps_file_path) {
                     json << "[" << pointData[i] << "," << pointData[i + 1] << "]";
                 }
                 json << "]";
-                // Read private tags for color/strokeWidth/tool
-                OFString pvColor, pvStroke, pvTool;
+                // Read private tags for color/strokeWidth/tool/fontSize
+                OFString pvColor, pvStroke, pvTool, pvFontSize;
                 graphicObj->findAndGetOFString(DcmTag(0x0071, 0x1010), pvColor);
                 graphicObj->findAndGetOFString(DcmTag(0x0071, 0x1011), pvStroke);
                 graphicObj->findAndGetOFString(DcmTag(0x0071, 0x1012), pvTool);
+                graphicObj->findAndGetOFString(DcmTag(0x0071, 0x1013), pvFontSize);
                 if (!pvColor.empty()) json << ",\"color\":\"" << pvColor.c_str() << "\"";
                 if (!pvStroke.empty()) json << ",\"strokeWidth\":" << pvStroke.c_str();
                 if (!pvTool.empty()) json << ",\"tool\":" << pvTool.c_str();
+                if (!pvFontSize.empty()) json << ",\"fontSize\":" << pvFontSize.c_str();
                 json << "}";
             }
             idx++;
@@ -2462,22 +2473,18 @@ char* dcmtk_parse_gsps(const char* gsps_file_path) {
         idx = 0;
         DcmItem* textObj = nullptr;
         while (annotItem->findAndGetSequenceItem(DCM_TextObjectSequence, textObj, idx).good() && textObj) {
-            OFString textValue, anchorStr;
+            OFString textValue;
             textObj->findAndGetOFString(DCM_UnformattedTextValue, textValue);
-            textObj->findAndGetOFString(DCM_AnchorPoint, anchorStr);
 
             if (!textValue.empty()) {
                 if (!firstAnnotation) json << ",";
                 firstAnnotation = false;
 
-                // Parse anchor point "x\\y"
-                double ax = 0, ay = 0;
-                std::string aStr(anchorStr.c_str());
-                size_t sep = aStr.find('\\');
-                if (sep != std::string::npos) {
-                    ax = atof(aStr.substr(0, sep).c_str());
-                    ay = atof(aStr.substr(sep + 1).c_str());
-                }
+                // Parse anchor point — AnchorPoint (0070,0014) is VR=FL with VM=2,
+                // so we must read each float value by position index.
+                Float32 ax = 0, ay = 0;
+                textObj->findAndGetFloat32(DCM_AnchorPoint, ax, 0);
+                textObj->findAndGetFloat32(DCM_AnchorPoint, ay, 1);
 
                 // Escape text for JSON
                 std::string escapedText;
@@ -2490,14 +2497,16 @@ char* dcmtk_parse_gsps(const char* gsps_file_path) {
 
                 json << "{\"type\":\"TEXT\",\"text\":\"" << escapedText
                      << "\",\"anchor\":[" << ax << "," << ay << "]";
-                // Read private tags for color/strokeWidth/tool
-                OFString pvColor, pvStroke, pvTool;
+                // Read private tags for color/strokeWidth/tool/fontSize
+                OFString pvColor, pvStroke, pvTool, pvFontSize;
                 textObj->findAndGetOFString(DcmTag(0x0071, 0x1010), pvColor);
                 textObj->findAndGetOFString(DcmTag(0x0071, 0x1011), pvStroke);
                 textObj->findAndGetOFString(DcmTag(0x0071, 0x1012), pvTool);
+                textObj->findAndGetOFString(DcmTag(0x0071, 0x1013), pvFontSize);
                 if (!pvColor.empty()) json << ",\"color\":\"" << pvColor.c_str() << "\"";
                 if (!pvStroke.empty()) json << ",\"strokeWidth\":" << pvStroke.c_str();
                 if (!pvTool.empty()) json << ",\"tool\":" << pvTool.c_str();
+                if (!pvFontSize.empty()) json << ",\"fontSize\":" << pvFontSize.c_str();
                 json << "}";
             }
             idx++;
