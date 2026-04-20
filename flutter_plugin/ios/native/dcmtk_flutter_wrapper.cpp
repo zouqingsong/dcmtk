@@ -2202,6 +2202,24 @@ MediaUploadResult* dcmtk_create_gsps(const char* source_dicom_path,
                     }
                 }
 
+                // Parse color (e.g. "#FFFF0000")
+                std::string colorValue;
+                size_t colorPos = obj.find("\"color\":\"");
+                if (colorPos != std::string::npos) {
+                    size_t colorStart = colorPos + 9;
+                    size_t colorEnd = obj.find('"', colorStart);
+                    if (colorEnd != std::string::npos) {
+                        colorValue = obj.substr(colorStart, colorEnd - colorStart);
+                    }
+                }
+
+                // Parse strokeWidth
+                double strokeWidth = 2.0;
+                size_t swPos = obj.find("\"strokeWidth\":");
+                if (swPos != std::string::npos) {
+                    strokeWidth = atof(obj.c_str() + swPos + 14);
+                }
+
                 // Map tool to GSPS graphic type and create objects
                 // tool: 0=freehand, 1=line, 2=arrow, 3=rectangle, 4=circle,
                 //        5=text, 6=ruler, 7=angle, 8=measureCircle
@@ -2218,6 +2236,14 @@ MediaUploadResult* dcmtk_create_gsps(const char* source_dicom_path,
                         textObjItem->putAndInsertOFStringArray(DCM_AnchorPoint, anchorStr);
                         textObjItem->putAndInsertOFStringArray(DCM_AnchorPointVisibility, "Y");
                         textObjItem->putAndInsertOFStringArray(DCM_AnchorPointAnnotationUnits, "PIXEL");
+                        // Store color/strokeWidth/tool as private tags
+                        textObjItem->putAndInsertOFStringArray(DcmTag(0x0071, 0x0010), "MEDVIEW");
+                        if (!colorValue.empty())
+                            textObjItem->putAndInsertOFStringArray(DcmTag(0x0071, 0x1010, EVR_LO), colorValue.c_str());
+                        textObjItem->putAndInsertOFStringArray(DcmTag(0x0071, 0x1011, EVR_LO),
+                            std::to_string(strokeWidth).c_str());
+                        textObjItem->putAndInsertOFStringArray(DcmTag(0x0071, 0x1012, EVR_LO),
+                            std::to_string(toolType).c_str());
                     }
                     textIdx++;
                 } else if (pointCoords.size() >= 4) {
@@ -2285,6 +2311,15 @@ MediaUploadResult* dcmtk_create_gsps(const char* source_dicom_path,
                         }
                         graphicObjItem->putAndInsertFloat32Array(DCM_GraphicData, pointData, (unsigned long)finalPoints.size());
                         delete[] pointData;
+
+                        // Store color/strokeWidth/tool as private tags
+                        graphicObjItem->putAndInsertOFStringArray(DcmTag(0x0071, 0x0010), "MEDVIEW");
+                        if (!colorValue.empty())
+                            graphicObjItem->putAndInsertOFStringArray(DcmTag(0x0071, 0x1010, EVR_LO), colorValue.c_str());
+                        graphicObjItem->putAndInsertOFStringArray(DcmTag(0x0071, 0x1011, EVR_LO),
+                            std::to_string(strokeWidth).c_str());
+                        graphicObjItem->putAndInsertOFStringArray(DcmTag(0x0071, 0x1012, EVR_LO),
+                            std::to_string(toolType).c_str());
                     }
                     graphicIdx++;
                 }
@@ -2409,7 +2444,16 @@ char* dcmtk_parse_gsps(const char* gsps_file_path) {
                     if (i > 0) json << ",";
                     json << "[" << pointData[i] << "," << pointData[i + 1] << "]";
                 }
-                json << "]}";
+                json << "]";
+                // Read private tags for color/strokeWidth/tool
+                OFString pvColor, pvStroke, pvTool;
+                graphicObj->findAndGetOFString(DcmTag(0x0071, 0x1010), pvColor);
+                graphicObj->findAndGetOFString(DcmTag(0x0071, 0x1011), pvStroke);
+                graphicObj->findAndGetOFString(DcmTag(0x0071, 0x1012), pvTool);
+                if (!pvColor.empty()) json << ",\"color\":\"" << pvColor.c_str() << "\"";
+                if (!pvStroke.empty()) json << ",\"strokeWidth\":" << pvStroke.c_str();
+                if (!pvTool.empty()) json << ",\"tool\":" << pvTool.c_str();
+                json << "}";
             }
             idx++;
         }
@@ -2445,7 +2489,16 @@ char* dcmtk_parse_gsps(const char* gsps_file_path) {
                 }
 
                 json << "{\"type\":\"TEXT\",\"text\":\"" << escapedText
-                     << "\",\"anchor\":[" << ax << "," << ay << "]}";
+                     << "\",\"anchor\":[" << ax << "," << ay << "]";
+                // Read private tags for color/strokeWidth/tool
+                OFString pvColor, pvStroke, pvTool;
+                textObj->findAndGetOFString(DcmTag(0x0071, 0x1010), pvColor);
+                textObj->findAndGetOFString(DcmTag(0x0071, 0x1011), pvStroke);
+                textObj->findAndGetOFString(DcmTag(0x0071, 0x1012), pvTool);
+                if (!pvColor.empty()) json << ",\"color\":\"" << pvColor.c_str() << "\"";
+                if (!pvStroke.empty()) json << ",\"strokeWidth\":" << pvStroke.c_str();
+                if (!pvTool.empty()) json << ",\"tool\":" << pvTool.c_str();
+                json << "}";
             }
             idx++;
         }
@@ -2901,38 +2954,7 @@ MediaUploadResult* dcmtk_upload_video(const char* server_host, int server_port, 
             return OFTrue;
         };
 
-        // Attempt 1: true video object (MPEG encapsulated)
-        const char* videoSopClassUID = UID_SecondaryCaptureImageStorage;
-        E_TransferSyntax videoTS = EXS_MPEG4HighProfileLevel4_1;
-        OFString videoTsUid = UID_MPEG4HighProfileLevel4_1TransferSyntax;
-
-        const bool isMpeg4 = (ext == "mp4" || ext == "m4v" || ext == "mov");
-        const bool isMpeg2 = (ext == "mpg" || ext == "mpeg");
-        if (isMpeg4) {
-            videoSopClassUID = UID_VideoPhotographicImageStorage;
-            videoTS = EXS_MPEG4HighProfileLevel4_1;
-            videoTsUid = UID_MPEG4HighProfileLevel4_1TransferSyntax;
-        } else if (isMpeg2) {
-            videoSopClassUID = UID_VideoEndoscopicImageStorage;
-            videoTS = EXS_MPEG2MainProfileAtMainLevel;
-            videoTsUid = UID_MPEG2MainProfileAtMainLevelTransferSyntax;
-        }
-
-        DcmFileFormat videoFileFormat;
-        DcmDataset* videoDataset = videoFileFormat.getDataset();
-        fillCommonTags(videoDataset, videoSopClassUID);
-        videoDataset->putAndInsertUint16(DCM_SamplesPerPixel, 3);
-        videoDataset->putAndInsertOFStringArray(DCM_PhotometricInterpretation, "YBR_FULL_422");
-        videoDataset->putAndInsertUint16(DCM_Rows, 480);
-        videoDataset->putAndInsertUint16(DCM_Columns, 640);
-        videoDataset->putAndInsertUint16(DCM_BitsAllocated, 8);
-        videoDataset->putAndInsertUint16(DCM_BitsStored, 8);
-        videoDataset->putAndInsertUint16(DCM_HighBit, 7);
-        videoDataset->putAndInsertUint16(DCM_PixelRepresentation, 0);
-        videoDataset->putAndInsertUint16(DCM_PlanarConfiguration, 0);
-        videoDataset->putAndInsertOFStringArray(DCM_NumberOfFrames, "1");
-
-        // Load file bytes and create encapsulated pixel data sequence
+        // Load video file bytes
         FILE* fp = fopen(video_path, "rb");
         if (!fp) {
             result->error_message = strdup(("Cannot open video file: " + std::string(video_path)).c_str());
@@ -2947,10 +2969,41 @@ MediaUploadResult* dcmtk_upload_video(const char* server_host, int server_port, 
 
         if ((long)bytesRead != fileSize) {
             free(videoData);
-            result->error_message = strdup("Failed to read video file completely");
+            result->error_message = strdup("Failed to read video file");
             return result;
         }
 
+        // Determine SOP class and transfer syntax based on video format
+        const char* videoSopClassUID = UID_VideoPhotographicImageStorage;
+        E_TransferSyntax videoTS = EXS_MPEG4HighProfileLevel4_1;
+        OFString videoTsUid = UID_MPEG4HighProfileLevel4_1TransferSyntax;
+
+        const bool isMpeg2 = (ext == "mpg" || ext == "mpeg");
+        if (isMpeg2) {
+            videoSopClassUID = UID_VideoEndoscopicImageStorage;
+            videoTS = EXS_MPEG2MainProfileAtMainLevel;
+            videoTsUid = UID_MPEG2MainProfileAtMainLevelTransferSyntax;
+        }
+
+        // Build native video DICOM object
+        DcmFileFormat videoFileFormat;
+        DcmDataset* videoDataset = videoFileFormat.getDataset();
+        fillCommonTags(videoDataset, videoSopClassUID);
+        videoDataset->putAndInsertUint16(DCM_SamplesPerPixel, 3);
+        videoDataset->putAndInsertOFStringArray(DCM_PhotometricInterpretation, "YBR_FULL_422");
+        videoDataset->putAndInsertUint16(DCM_Rows, 480);
+        videoDataset->putAndInsertUint16(DCM_Columns, 640);
+        videoDataset->putAndInsertUint16(DCM_BitsAllocated, 8);
+        videoDataset->putAndInsertUint16(DCM_BitsStored, 8);
+        videoDataset->putAndInsertUint16(DCM_HighBit, 7);
+        videoDataset->putAndInsertUint16(DCM_PixelRepresentation, 0);
+        videoDataset->putAndInsertUint16(DCM_PlanarConfiguration, 0);
+        videoDataset->putAndInsertOFStringArray(DCM_NumberOfFrames, "1");
+        if (image_comments && strlen(image_comments) > 0) {
+            videoDataset->putAndInsertOFStringArray(DCM_ImageComments, image_comments);
+        }
+
+        // Encapsulate video data in pixel sequence
         DcmPixelData* pixelData = new DcmPixelData(DCM_PixelData);
         DcmPixelSequence* pixelSeq = new DcmPixelSequence(DCM_PixelSequenceTag);
         DcmPixelItem* offsetTable = new DcmPixelItem(DCM_PixelItemTag);
@@ -2962,64 +3015,16 @@ MediaUploadResult* dcmtk_upload_video(const char* server_host, int server_port, 
         videoDataset->insert(pixelData, OFTrue);
         free(videoData);
 
-        if (image_comments && strlen(image_comments) > 0) {
-            videoDataset->putAndInsertOFStringArray(DCM_ImageComments, image_comments);
-        }
-
         OFList<OFString> videoTransferSyntaxes;
         videoTransferSyntaxes.push_back(videoTsUid);
-        videoTransferSyntaxes.push_back(UID_LittleEndianExplicitTransferSyntax);
-        videoTransferSyntaxes.push_back(UID_LittleEndianImplicitTransferSyntax);
 
         std::string sendErr;
         if (sendStore(videoDataset, videoSopClassUID, videoTransferSyntaxes, sendErr)) {
+            DEBUG_LOG("Video uploaded as native DICOM video: SOP UID = %s", sopUID);
             result->success = 1;
             result->study_instance_uid = strdup(studyUID);
             result->series_instance_uid = strdup(seriesUID);
             result->sop_instance_uid = strdup(sopUID);
-            DEBUG_LOG("Video uploaded successfully (native video object): SOP UID = %s", sopUID);
-            return result;
-        }
-
-        DEBUG_LOG("Native video upload failed, falling back to Secondary Capture: %s", sendErr.c_str());
-
-        // Attempt 2 (fallback): guaranteed SC object with metadata reference.
-        // This keeps upload working even when server does not accept video SOP/TS.
-        DcmFileFormat scFileFormat;
-        DcmDataset* scDataset = scFileFormat.getDataset();
-        char fallbackSopUID[100];
-        dcmGenerateUniqueIdentifier(fallbackSopUID, SITE_INSTANCE_UID_ROOT);
-        fillCommonTags(scDataset, UID_SecondaryCaptureImageStorage);
-        scDataset->putAndInsertOFStringArray(DCM_SOPInstanceUID, fallbackSopUID);
-        scDataset->putAndInsertOFStringArray(DCM_SOPClassUID, UID_SecondaryCaptureImageStorage);
-        scDataset->putAndInsertUint16(DCM_SamplesPerPixel, 1);
-        scDataset->putAndInsertOFStringArray(DCM_PhotometricInterpretation, "MONOCHROME2");
-        scDataset->putAndInsertUint16(DCM_Rows, 1);
-        scDataset->putAndInsertUint16(DCM_Columns, 1);
-        scDataset->putAndInsertUint16(DCM_BitsAllocated, 8);
-        scDataset->putAndInsertUint16(DCM_BitsStored, 8);
-        scDataset->putAndInsertUint16(DCM_HighBit, 7);
-        scDataset->putAndInsertUint16(DCM_PixelRepresentation, 0);
-        Uint8 blackPixel = 0;
-        scDataset->putAndInsertUint8Array(DCM_PixelData, &blackPixel, 1);
-
-        std::ostringstream fallbackComments;
-        fallbackComments << "Video upload fallback record. Source=" << video_path;
-        if (image_comments && strlen(image_comments) > 0) {
-            fallbackComments << "; " << image_comments;
-        }
-        scDataset->putAndInsertOFStringArray(DCM_ImageComments, fallbackComments.str().c_str());
-
-        OFList<OFString> scTransferSyntaxes;
-        scTransferSyntaxes.push_back(UID_LittleEndianExplicitTransferSyntax);
-        scTransferSyntaxes.push_back(UID_LittleEndianImplicitTransferSyntax);
-
-        if (sendStore(scDataset, UID_SecondaryCaptureImageStorage, scTransferSyntaxes, sendErr)) {
-            result->success = 1;
-            result->study_instance_uid = strdup(studyUID);
-            result->series_instance_uid = strdup(seriesUID);
-            result->sop_instance_uid = strdup(fallbackSopUID);
-            DEBUG_LOG("Video uploaded via fallback Secondary Capture record: SOP UID = %s", fallbackSopUID);
             return result;
         }
 
