@@ -12,7 +12,7 @@ BUILD_DIR="$PROJECT_ROOT/build_mobile/android/openssl"
 OPENSSL_SRC_DIR="$BUILD_DIR/openssl-${OPENSSL_VERSION}"
 INSTALL_DIR="$BUILD_DIR/install"
 
-ANDROID_API=24
+ANDROID_API=28
 
 echo "=== Building OpenSSL ${OPENSSL_VERSION} for Android ==="
 echo "Build directory: $BUILD_DIR"

@@ -61,7 +61,7 @@ for ABI in "${ANDROID_ABIS[@]}"; do
     cmake -G "Unix Makefiles" \
         -DCMAKE_TOOLCHAIN_FILE="$ANDROID_NDK_ROOT/build/cmake/android.toolchain.cmake" \
         -DANDROID_ABI="$ABI" \
-        -DANDROID_PLATFORM=android-24 \
+        -DANDROID_PLATFORM=android-28 \
         -DANDROID_STL=c++_shared \
         -DCMAKE_BUILD_TYPE=Release \
         -DCMAKE_INSTALL_PREFIX="$ABI_BUILD_DIR/install" \
