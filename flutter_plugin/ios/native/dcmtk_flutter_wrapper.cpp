@@ -1,5 +1,6 @@
 #include "dcmtk_flutter_wrapper.h"
 #include <dcmtk/dcmdata/dctk.h>
+#include <dcmtk/dcmdata/dcdict.h>
 #include <dcmtk/dcmdata/dcfilefo.h>
 #include <dcmtk/dcmdata/dcxfer.h>
 #include <dcmtk/dcmdata/dcpixel.h>
@@ -129,6 +130,33 @@ static bool maybe_apply_tls(DcmSCU& scu) {
 }
 
 extern "C" {
+
+int dcmtk_init_dictionary(const char* dictionary_path) {
+    if (!dictionary_path || !*dictionary_path) {
+        DEBUG_LOG("Dictionary init failed: no path provided");
+        return 0;
+    }
+
+    DEBUG_LOG("Initializing DCMTK dictionary from %s", dictionary_path);
+#if defined(_WIN32)
+    _putenv_s("DCMDICTPATH", dictionary_path);
+#else
+    setenv("DCMDICTPATH", dictionary_path, 1);
+#endif
+
+    OFBool loaded = OFFalse;
+    DcmDataDictionary& dictionary = dcmDataDict.wrlock();
+    loaded = dictionary.loadDictionary(dictionary_path, OFTrue);
+    dcmDataDict.wrunlock();
+
+    if (!loaded || !dcmDataDict.isDictionaryLoaded()) {
+        DEBUG_LOG("Dictionary init failed for %s", dictionary_path);
+        return 0;
+    }
+
+    DEBUG_LOG("Dictionary successfully loaded from %s", dictionary_path);
+    return 1;
+}
 
 char* dcmtk_load_dicom_file(const char* filename) {
     if (!filename) {

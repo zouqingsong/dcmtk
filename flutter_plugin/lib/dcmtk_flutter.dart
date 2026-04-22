@@ -109,8 +109,24 @@ class DcmtkFlutter {
         return {'error': e.message ?? 'Unknown extraction error'};
       }
     } else if (Platform.isAndroid) {
-      // TODO: Implement Android FFI image extraction
-      return null;
+      try {
+        final Map<dynamic, dynamic> result = await _methodChannel.invokeMethod('extractImage', {
+          'filePath': filePath,
+          'frameIndex': frameIndex,
+          'windowCenter': windowCenter,
+          'windowWidth': windowWidth,
+        });
+        return {
+          'width': result['width'] as int,
+          'height': result['height'] as int,
+          'data': result['data'] as Uint8List,
+          'samplesPerPixel': result['samplesPerPixel'] as int? ?? 1,
+          'bitsStored': result['bitsStored'] as int? ?? 8,
+          'totalFrames': result['totalFrames'] as int? ?? 1,
+        };
+      } on PlatformException catch (e) {
+        return {'error': e.message ?? 'Unknown extraction error'};
+      }
     } else {
       return null;
     }
@@ -135,8 +151,20 @@ class DcmtkFlutter {
         return null;
       }
     } else if (Platform.isAndroid) {
-      // TODO: Implement Android video extraction
-      return null;
+      try {
+        final Map<dynamic, dynamic> result = await _methodChannel.invokeMethod('extractVideo', {
+          'dicomPath': dicomPath,
+          'outputPath': outputPath,
+        });
+        return {
+          'outputPath': result['outputPath'] as String,
+          'mimeType': result['mimeType'] as String,
+          'fileSize': result['fileSize'] as int,
+        };
+      } on PlatformException catch (e) {
+        print("Error extracting video: ${e.message}");
+        return null;
+      }
     } else {
       return null;
     }
@@ -145,7 +173,7 @@ class DcmtkFlutter {
   /// Get a specific DICOM tag value from a file
   /// tagName can be a group,element pair like "0010,0010" or a name like "PatientName"
   Future<String> getDicomTag(String filePath, String tagName) async {
-    if (Platform.isIOS) {
+    if (Platform.isIOS || Platform.isAndroid) {
       try {
         final String result = await _methodChannel.invokeMethod('getDicomTag', {
           'filePath': filePath,
@@ -161,7 +189,7 @@ class DcmtkFlutter {
 
   /// Validate if a file is a valid DICOM file
   Future<bool> validateDicomFile(String filePath) async {
-    if (Platform.isIOS) {
+    if (Platform.isIOS || Platform.isAndroid) {
       try {
         final bool result = await _methodChannel.invokeMethod('validateDicomFile', {
           'filePath': filePath,
@@ -196,8 +224,18 @@ class DcmtkFlutter {
         return false;
       }
     } else if (Platform.isAndroid) {
-      // TODO: Implement Android FFI server communication
-      return false;
+      try {
+        final bool result = await _methodChannel.invokeMethod('testServerConnection', {
+          'serverHost': serverHost,
+          'serverPort': serverPort,
+          'aeTitle': aeTitle,
+          'calledAeTitle': calledAeTitle,
+        });
+        return result;
+      } on PlatformException catch (e) {
+        print("Error testing server connection: ${e.message}");
+        return false;
+      }
     } else {
       return false;
     }
@@ -244,7 +282,7 @@ class DcmtkFlutter {
     required String calledAeTitle,
     String patientNameFilter = '',
   }) async {
-    if (Platform.isIOS) {
+    if (Platform.isIOS || Platform.isAndroid) {
       try {
         final List<dynamic> result = await _methodChannel.invokeMethod('queryPatients', {
           'serverHost': serverHost,
@@ -263,11 +301,8 @@ class DcmtkFlutter {
         }).toList();
       } on PlatformException catch (e) {
         print("Error querying patients: ${e.message}");
-        return [];
+        rethrow;
       }
-    } else if (Platform.isAndroid) {
-      // TODO: Implement Android FFI patient querying
-      return [];
     } else {
       return [];
     }
@@ -282,7 +317,7 @@ class DcmtkFlutter {
     required String calledAeTitle,
     required String patientId,
   }) async {
-    if (Platform.isIOS) {
+    if (Platform.isIOS || Platform.isAndroid) {
       try {
         final List<dynamic> result = await _methodChannel.invokeMethod('queryStudiesForPatient', {
           'serverHost': serverHost,
@@ -301,11 +336,8 @@ class DcmtkFlutter {
         }).toList();
       } on PlatformException catch (e) {
         print("Error querying studies: ${e.message}");
-        return [];
+        rethrow;
       }
-    } else if (Platform.isAndroid) {
-      // TODO: Implement Android FFI study querying
-      return [];
     } else {
       return [];
     }
@@ -320,7 +352,7 @@ class DcmtkFlutter {
     required String calledAeTitle,
     required String studyInstanceUID,
   }) async {
-    if (Platform.isIOS) {
+    if (Platform.isIOS || Platform.isAndroid) {
       try {
         final List<dynamic> result = await _methodChannel.invokeMethod('querySeriesForStudy', {
           'serverHost': serverHost,
@@ -339,11 +371,8 @@ class DcmtkFlutter {
         }).toList();
       } on PlatformException catch (e) {
         print("Error querying series: ${e.message}");
-        return [];
+        rethrow;
       }
-    } else if (Platform.isAndroid) {
-      // TODO: Implement Android FFI series querying
-      return [];
     } else {
       return [];
     }
@@ -357,7 +386,7 @@ class DcmtkFlutter {
     required String calledAeTitle,
     required String seriesInstanceUID,
   }) async {
-    if (Platform.isIOS) {
+    if (Platform.isIOS || Platform.isAndroid) {
       try {
         final List<dynamic> result = await _methodChannel.invokeMethod('queryInstancesForSeries', {
           'serverHost': serverHost,
@@ -372,7 +401,7 @@ class DcmtkFlutter {
         }).toList();
       } on PlatformException catch (e) {
         print("Error querying instances: ${e.message}");
-        return [];
+        rethrow;
       }
     }
     return [];
@@ -411,8 +440,23 @@ class DcmtkFlutter {
         rethrow;
       }
     } else if (Platform.isAndroid) {
-      // TODO: Implement Android FFI C-MOVE download
-      return [];
+      try {
+        final List<dynamic> result = await _methodChannel.invokeMethod('downloadInstancesViaCMove', {
+          'serverHost': serverHost,
+          'serverPort': serverPort,
+          'aeTitle': aeTitle,
+          'calledAeTitle': calledAeTitle,
+          'seriesInstanceUID': seriesInstanceUID,
+          'localStoragePath': localStoragePath,
+        });
+        return result.map((item) {
+          if (item is Map) return Map<String, dynamic>.from(item);
+          return <String, dynamic>{};
+        }).toList();
+      } on PlatformException catch (e) {
+        print("Error downloading instances via C-MOVE: ${e.message}");
+        rethrow;
+      }
     } else {
       return [];
     }
@@ -460,8 +504,22 @@ class DcmtkFlutter {
         return {'success': false, 'error': e.message};
       }
     } else if (Platform.isAndroid) {
-      // TODO: Implement Android FFI patient creation
-      return {'success': false, 'error': 'Not implemented for Android'};
+      try {
+        final dynamic result = await _methodChannel.invokeMethod('createPatient', {
+          'serverHost': serverHost,
+          'serverPort': serverPort,
+          'aeTitle': aeTitle,
+          'calledAeTitle': calledAeTitle,
+          'patientId': patientId,
+          'patientName': patientName,
+          'birthDate': birthDate,
+          'sex': sex,
+          'comments': comments,
+        });
+        return Map<String, dynamic>.from(result as Map);
+      } on PlatformException catch (e) {
+        return {'success': false, 'error': e.message};
+      }
     } else {
       return {'success': false, 'error': 'Platform not supported'};
     }
@@ -478,7 +536,7 @@ class DcmtkFlutter {
     required String annotationsJson,
     required String outputPath,
   }) async {
-    if (Platform.isIOS) {
+    if (Platform.isIOS || Platform.isAndroid) {
       try {
         final dynamic result = await _methodChannel.invokeMethod('createGsps', {
           'sourceDicomPath': sourceDicomPath,
@@ -489,8 +547,6 @@ class DcmtkFlutter {
       } on PlatformException catch (e) {
         return {'success': false, 'error': e.message};
       }
-    } else if (Platform.isAndroid) {
-      return {'success': false, 'error': 'Not implemented for Android'};
     } else {
       return {'success': false, 'error': 'Platform not supported'};
     }
@@ -502,7 +558,7 @@ class DcmtkFlutter {
   ///   referencedSOPInstanceUID, referencedSeriesInstanceUID,
   ///   annotations: [{type, points, text, anchor}, ...]
   Future<String?> parseGsps(String filePath) async {
-    if (Platform.isIOS) {
+    if (Platform.isIOS || Platform.isAndroid) {
       try {
         final result = await _methodChannel.invokeMethod('parseGsps', {
           'filePath': filePath,
@@ -605,8 +661,28 @@ class DcmtkFlutter {
         return {'success': false, 'error': e.message};
       }
     } else if (Platform.isAndroid) {
-      // TODO: Implement Android FFI image upload
-      return {'success': false, 'error': 'Not implemented for Android'};
+      try {
+        final dynamic result = await _methodChannel.invokeMethod('uploadImage', {
+          'serverHost': serverHost,
+          'serverPort': serverPort,
+          'aeTitle': aeTitle,
+          'calledAeTitle': calledAeTitle,
+          'patientId': patientId,
+          'imagePath': imagePath,
+          'patientName': patientName,
+          'patientBirthDate': patientBirthDate,
+          'studyDescription': studyDescription,
+          'seriesDescription': seriesDescription,
+          'imageComments': imageComments,
+          'modality': modality,
+          'studyInstanceUID': studyInstanceUID,
+          'seriesInstanceUID': seriesInstanceUID,
+          'instanceNumber': instanceNumber,
+        });
+        return Map<String, dynamic>.from(result as Map);
+      } on PlatformException catch (e) {
+        return {'success': false, 'error': e.message};
+      }
     } else {
       return {'success': false, 'error': 'Platform not supported'};
     }
@@ -700,8 +776,25 @@ class DcmtkFlutter {
         return {'success': false, 'error': e.message};
       }
     } else if (Platform.isAndroid) {
-      // TODO: Implement Android FFI video upload
-      return {'success': false, 'error': 'Not implemented for Android'};
+      try {
+        final dynamic result = await _methodChannel.invokeMethod('uploadVideo', {
+          'serverHost': serverHost,
+          'serverPort': serverPort,
+          'aeTitle': aeTitle,
+          'calledAeTitle': calledAeTitle,
+          'patientId': patientId,
+          'videoPath': videoPath,
+          'patientName': patientName,
+          'patientBirthDate': patientBirthDate,
+          'studyDescription': studyDescription,
+          'seriesDescription': seriesDescription,
+          'imageComments': imageComments,
+          'modality': modality,
+        });
+        return Map<String, dynamic>.from(result as Map);
+      } on PlatformException catch (e) {
+        return {'success': false, 'error': e.message};
+      }
     } else {
       return {'success': false, 'error': 'Platform not supported'};
     }
@@ -854,7 +947,7 @@ class DcmtkFlutter {
   /// Build a 3D volume from a series of DICOM files.
   /// Returns volume metadata including volumeId for subsequent calls.
   Future<Map<String, dynamic>?> buildMprVolume(List<String> filePaths) async {
-    if (Platform.isIOS) {
+    if (Platform.isIOS || Platform.isAndroid) {
       try {
         final dynamic result = await _methodChannel.invokeMethod('buildMprVolume', {
           'filePaths': filePaths,
@@ -873,7 +966,7 @@ class DcmtkFlutter {
     double windowCenter = 0,
     double windowWidth = 0,
   }) async {
-    if (Platform.isIOS) {
+    if (Platform.isIOS || Platform.isAndroid) {
       try {
         final dynamic result = await _methodChannel.invokeMethod('getMprSlice', {
           'volumeId': volumeId,
@@ -892,7 +985,7 @@ class DcmtkFlutter {
 
   /// Free a previously built MPR volume to release memory.
   Future<void> freeMprVolume(int volumeId) async {
-    if (Platform.isIOS) {
+    if (Platform.isIOS || Platform.isAndroid) {
       await _methodChannel.invokeMethod('freeMprVolume', {
         'volumeId': volumeId,
       });
@@ -909,7 +1002,7 @@ class DcmtkFlutter {
     double windowCenter = 0,
     double windowWidth = 0,
   }) async {
-    if (Platform.isIOS) {
+    if (Platform.isIOS || Platform.isAndroid) {
       final result = await _methodChannel.invokeMethod<Map>('renderMip', {
         'volumeId': volumeId,
         'rotationX': rotationX,

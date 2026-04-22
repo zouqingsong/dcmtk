@@ -1,6 +1,9 @@
 group 'com.dcmtk.flutter'
 version '1.0-SNAPSHOT'
 
+def dcmtkDictionarySource = file('../../dcmdata/data/dicom.dic')
+def generatedDcmtkAssetsDir = "$buildDir/generated/dcmtk-assets"
+
 buildscript {
     ext.kotlin_version = '2.1.0'
     repositories {
@@ -68,7 +71,19 @@ android {
     sourceSets {
         main {
             jniLibs.srcDirs = ['src/main/jniLibs']
+            assets.srcDirs += [generatedDcmtkAssetsDir]
         }
+    }
+}
+
+tasks.register('copyDcmtkDictionary', Copy) {
+    from(dcmtkDictionarySource)
+    into("$generatedDcmtkAssetsDir/dcmtk")
+}
+
+afterEvaluate {
+    tasks.matching { it.name.startsWith('merge') && it.name.endsWith('Assets') }.configureEach {
+        dependsOn(tasks.named('copyDcmtkDictionary'))
     }
 }
 

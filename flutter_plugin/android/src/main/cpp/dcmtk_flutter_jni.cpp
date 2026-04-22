@@ -156,6 +156,15 @@ Java_com_dcmtk_flutter_DcmtkFlutterPlugin_nativeTestServerConnectionTls(JNIEnv *
     return result;
 }
 
+extern "C" JNIEXPORT jboolean JNICALL
+Java_com_dcmtk_flutter_DcmtkFlutterPlugin_nativeInitDictionary(JNIEnv *env, jobject,
+                jstring dictionaryPath) {
+        const char *path = jstringToChar(env, dictionaryPath);
+        int result = dcmtk_init_dictionary(path);
+        releaseString(env, dictionaryPath, path);
+        return result == 1 ? JNI_TRUE : JNI_FALSE;
+}
+
 // ==================== Query operations ====================
 
 static jobject createPatientList(JNIEnv* env, DicomQueryResult* queryResult) {

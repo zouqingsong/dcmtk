@@ -141,6 +141,7 @@ int dcmtk_test_server_connection(const char* server_host, int server_port, const
 // TLS-enabled server connection test
 int dcmtk_test_server_connection_tls(const char* server_host, int server_port, const char* ae_title, const char* called_ae_title,
                                       const char* cert_file, const char* key_file, const char* ca_file);
+int dcmtk_init_dictionary(const char* dictionary_path);
 DicomQueryResult* dcmtk_query_patients(const char* server_host, int server_port, const char* ae_title, const char* called_ae_title, const char* patient_name_filter);
 DicomStudyQueryResult* dcmtk_query_studies_for_patient(const char* server_host, int server_port, const char* ae_title, const char* called_ae_title, const char* patient_id);
 

@@ -1,5 +1,9 @@
 package com.dcmtk.flutter;
 
+import android.content.Context;
+import android.content.res.AssetManager;
+import android.util.Log;
+
 import androidx.annotation.NonNull;
 
 import io.flutter.embedding.engine.plugins.FlutterPlugin;
@@ -9,13 +13,19 @@ import io.flutter.plugin.common.MethodChannel.MethodCallHandler;
 import io.flutter.plugin.common.MethodChannel.Result;
 
 import java.util.ArrayList;
+import java.io.File;
+import java.io.FileOutputStream;
+import java.io.IOException;
+import java.io.InputStream;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
 /** DcmtkFlutterPlugin */
 public class DcmtkFlutterPlugin implements FlutterPlugin, MethodCallHandler {
+  private static final String TAG = "DcmtkFlutter";
   private MethodChannel channel;
+  private Context applicationContext;
 
   static {
     System.loadLibrary("dcmtk_flutter");
@@ -29,6 +39,7 @@ public class DcmtkFlutterPlugin implements FlutterPlugin, MethodCallHandler {
   private native HashMap<String, Object> nativeExtractImage(String filePath, int frameIndex, double windowCenter, double windowWidth);
   private native boolean nativeTestServerConnection(String serverHost, int serverPort, String aeTitle, String calledAeTitle);
   private native int nativeTestServerConnectionTls(String serverHost, int serverPort, String aeTitle, String calledAeTitle, String certFile, String keyFile, String caFile);
+  private native boolean nativeInitDictionary(String dictionaryPath);
   private native HashMap<String, Object> nativeQueryPatients(String serverHost, int serverPort, String aeTitle, String calledAeTitle, String patientNameFilter);
   private native HashMap<String, Object> nativeQueryStudiesForPatient(String serverHost, int serverPort, String aeTitle, String calledAeTitle, String patientId);
   private native HashMap<String, Object> nativeQuerySeriesForStudy(String serverHost, int serverPort, String aeTitle, String calledAeTitle, String studyInstanceUID);
@@ -58,8 +69,56 @@ public class DcmtkFlutterPlugin implements FlutterPlugin, MethodCallHandler {
 
   @Override
   public void onAttachedToEngine(@NonNull FlutterPluginBinding flutterPluginBinding) {
+    applicationContext = flutterPluginBinding.getApplicationContext();
     channel = new MethodChannel(flutterPluginBinding.getBinaryMessenger(), "dcmtk_flutter");
     channel.setMethodCallHandler(this);
+    initializeDictionary();
+  }
+
+  private void initializeDictionary() {
+    if (applicationContext == null) {
+      Log.e(TAG, "Cannot initialize dictionary: application context is null");
+      return;
+    }
+
+    final File dcmtkDir = new File(applicationContext.getFilesDir(), "dcmtk");
+    if (!dcmtkDir.exists() && !dcmtkDir.mkdirs()) {
+      Log.e(TAG, "Failed to create DCMTK files dir: " + dcmtkDir.getAbsolutePath());
+      return;
+    }
+
+    final File dictionaryFile = new File(dcmtkDir, "dicom.dic");
+    try {
+      copyAssetIfNeeded(applicationContext.getAssets(), "dcmtk/dicom.dic", dictionaryFile);
+      if (!nativeInitDictionary(dictionaryFile.getAbsolutePath())) {
+        Log.e(TAG, "Failed to initialize DCMTK dictionary from " + dictionaryFile.getAbsolutePath());
+      }
+    } catch (IOException e) {
+      Log.e(TAG, "Failed to copy DCMTK dictionary asset", e);
+    }
+  }
+
+  private static void copyAssetIfNeeded(AssetManager assetManager, String assetPath, File destination) throws IOException {
+    boolean shouldCopy = !destination.exists();
+    if (!shouldCopy) {
+      try (InputStream in = assetManager.open(assetPath)) {
+        shouldCopy = destination.length() != in.available();
+      }
+    }
+
+    if (!shouldCopy) {
+      return;
+    }
+
+    try (InputStream in = assetManager.open(assetPath);
+         FileOutputStream out = new FileOutputStream(destination, false)) {
+      byte[] buffer = new byte[8192];
+      int read;
+      while ((read = in.read(buffer)) != -1) {
+        out.write(buffer, 0, read);
+      }
+      out.flush();
+    }
   }
 
   @Override
