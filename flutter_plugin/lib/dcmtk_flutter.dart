@@ -19,8 +19,11 @@ class DcmtkFlutter {
   late _LoadDicomFile? _loadDicomFile;
   late _FreeString? _freeString;
   
-  // Method channel (for iOS)
+  // Method channel (for iOS and macOS)
   static const MethodChannel _methodChannel = MethodChannel('dcmtk_flutter');
+
+  /// Whether the current platform uses MethodChannel (iOS/macOS)
+  bool get _useMethodChannel => Platform.isIOS || Platform.isMacOS;
 
   DcmtkFlutter._internal() {
     if (Platform.isAndroid) {
@@ -31,8 +34,8 @@ class DcmtkFlutter {
       _freeString = _dylib!
           .lookup<NativeFunction<_FreeStringNative>>('dcmtk_free_string')
           .asFunction();
-    } else if (Platform.isIOS) {
-      // iOS uses MethodChannel instead of FFI
+    } else if (_useMethodChannel) {
+      // iOS and macOS use MethodChannel
       _dylib = null;
       _loadDicomFile = null;
       _freeString = null;
@@ -54,7 +57,7 @@ class DcmtkFlutter {
   /// Load and parse a DICOM file
   /// Returns string with DICOM file information
   Future<String> loadDicomFile(String filePath) async {
-    if (Platform.isIOS) {
+    if (_useMethodChannel) {
       // Use MethodChannel for iOS
       try {
         final String result = await _methodChannel.invokeMethod('loadDicomFile', {
@@ -88,7 +91,7 @@ class DcmtkFlutter {
   /// Optional [windowCenter] and [windowWidth] for custom window/level (grayscale only).
   /// If windowWidth is 0 or not provided, the default window from the DICOM file is used.
   Future<Map<String, dynamic>?> extractImage(String filePath, {int frameIndex = 0, double windowCenter = 0, double windowWidth = 0}) async {
-    if (Platform.isIOS) {
+    if (_useMethodChannel) {
       try {
         final Map<dynamic, dynamic> result = await _methodChannel.invokeMethod('extractImage', {
           'filePath': filePath,
@@ -135,7 +138,7 @@ class DcmtkFlutter {
   /// Extract video payload from a DICOM video file to an output file
   /// Returns Map with 'outputPath', 'mimeType', 'fileSize', or null on error
   Future<Map<String, dynamic>?> extractVideo(String dicomPath, String outputPath) async {
-    if (Platform.isIOS) {
+    if (_useMethodChannel) {
       try {
         final Map<dynamic, dynamic> result = await _methodChannel.invokeMethod('extractVideo', {
           'dicomPath': dicomPath,
@@ -173,7 +176,7 @@ class DcmtkFlutter {
   /// Get a specific DICOM tag value from a file
   /// tagName can be a group,element pair like "0010,0010" or a name like "PatientName"
   Future<String> getDicomTag(String filePath, String tagName) async {
-    if (Platform.isIOS || Platform.isAndroid) {
+    if (_useMethodChannel) {
       try {
         final String result = await _methodChannel.invokeMethod('getDicomTag', {
           'filePath': filePath,
@@ -189,7 +192,7 @@ class DcmtkFlutter {
 
   /// Validate if a file is a valid DICOM file
   Future<bool> validateDicomFile(String filePath) async {
-    if (Platform.isIOS || Platform.isAndroid) {
+    if (_useMethodChannel) {
       try {
         final bool result = await _methodChannel.invokeMethod('validateDicomFile', {
           'filePath': filePath,
@@ -210,7 +213,7 @@ class DcmtkFlutter {
     required String aeTitle,
     required String calledAeTitle,
   }) async {
-    if (Platform.isIOS) {
+    if (_useMethodChannel) {
       try {
         final bool result = await _methodChannel.invokeMethod('testServerConnection', {
           'serverHost': serverHost,
@@ -253,7 +256,7 @@ class DcmtkFlutter {
     String keyFile = '',
     String caFile = '',
   }) async {
-    if (Platform.isIOS) {
+    if (_useMethodChannel) {
       try {
         final bool result = await _methodChannel.invokeMethod('testServerConnectionTls', {
           'serverHost': serverHost,
@@ -282,7 +285,7 @@ class DcmtkFlutter {
     required String calledAeTitle,
     String patientNameFilter = '',
   }) async {
-    if (Platform.isIOS || Platform.isAndroid) {
+    if (_useMethodChannel) {
       try {
         final List<dynamic> result = await _methodChannel.invokeMethod('queryPatients', {
           'serverHost': serverHost,
@@ -317,7 +320,7 @@ class DcmtkFlutter {
     required String calledAeTitle,
     required String patientId,
   }) async {
-    if (Platform.isIOS || Platform.isAndroid) {
+    if (_useMethodChannel) {
       try {
         final List<dynamic> result = await _methodChannel.invokeMethod('queryStudiesForPatient', {
           'serverHost': serverHost,
@@ -352,7 +355,7 @@ class DcmtkFlutter {
     required String calledAeTitle,
     required String studyInstanceUID,
   }) async {
-    if (Platform.isIOS || Platform.isAndroid) {
+    if (_useMethodChannel) {
       try {
         final List<dynamic> result = await _methodChannel.invokeMethod('querySeriesForStudy', {
           'serverHost': serverHost,
@@ -386,7 +389,7 @@ class DcmtkFlutter {
     required String calledAeTitle,
     required String seriesInstanceUID,
   }) async {
-    if (Platform.isIOS || Platform.isAndroid) {
+    if (_useMethodChannel) {
       try {
         final List<dynamic> result = await _methodChannel.invokeMethod('queryInstancesForSeries', {
           'serverHost': serverHost,
@@ -417,7 +420,7 @@ class DcmtkFlutter {
     required String seriesInstanceUID,
     required String localStoragePath,
   }) async {
-    if (Platform.isIOS) {
+    if (_useMethodChannel) {
       try {
         final List<dynamic> result = await _methodChannel.invokeMethod('downloadInstancesViaCMove', {
           'serverHost': serverHost,
@@ -476,7 +479,7 @@ class DcmtkFlutter {
     String comments = '',
   }) async {
     print('[Dart] createPatient called with: host=$serverHost, port=$serverPort, patientId=$patientId');
-    if (Platform.isIOS) {
+    if (_useMethodChannel) {
       try {
         print('[Dart] Calling iOS method channel for createPatient');
         final dynamic result = await _methodChannel.invokeMethod('createPatient', {
@@ -536,7 +539,7 @@ class DcmtkFlutter {
     required String annotationsJson,
     required String outputPath,
   }) async {
-    if (Platform.isIOS || Platform.isAndroid) {
+    if (_useMethodChannel) {
       try {
         final dynamic result = await _methodChannel.invokeMethod('createGsps', {
           'sourceDicomPath': sourceDicomPath,
@@ -558,7 +561,7 @@ class DcmtkFlutter {
   ///   referencedSOPInstanceUID, referencedSeriesInstanceUID,
   ///   annotations: [{type, points, text, anchor}, ...]
   Future<String?> parseGsps(String filePath) async {
-    if (Platform.isIOS || Platform.isAndroid) {
+    if (_useMethodChannel) {
       try {
         final result = await _methodChannel.invokeMethod('parseGsps', {
           'filePath': filePath,
@@ -587,7 +590,7 @@ class DcmtkFlutter {
     String seriesInstanceUID = '',
     int instanceNumber = 1,
   }) async {
-    if (Platform.isIOS) {
+    if (_useMethodChannel) {
       try {
         final dynamic result = await _methodChannel.invokeMethod('convertImageToDicom', {
           'imagePath': imagePath,
@@ -634,7 +637,7 @@ class DcmtkFlutter {
     int instanceNumber = 1,
   }) async {
     print('[Dart] uploadImage called with: host=$serverHost, port=$serverPort, patientId=$patientId, imagePath=$imagePath, instance#=$instanceNumber');
-    if (Platform.isIOS) {
+    if (_useMethodChannel) {
       try {
         print('[Dart] Calling iOS method channel for uploadImage');
         final dynamic result = await _methodChannel.invokeMethod('uploadImage', {
@@ -707,7 +710,7 @@ class DcmtkFlutter {
     String seriesInstanceUID = '',
   }) async {
     print('[Dart] uploadMultiframe called with: host=$serverHost, port=$serverPort, patientId=$patientId, ${imagePaths.length} images');
-    if (Platform.isIOS) {
+    if (_useMethodChannel) {
       try {
         final dynamic result = await _methodChannel.invokeMethod('uploadMultiframe', {
           'serverHost': serverHost,
@@ -754,7 +757,7 @@ class DcmtkFlutter {
     String imageComments = '',
     String modality = 'SC',
   }) async {
-    if (Platform.isIOS) {
+    if (_useMethodChannel) {
       try {
         final dynamic result = await _methodChannel.invokeMethod('uploadVideo', {
           'serverHost': serverHost,
@@ -810,7 +813,7 @@ class DcmtkFlutter {
     required String calledAeTitle,
     required List<String> filePaths,
   }) async {
-    if (Platform.isIOS) {
+    if (_useMethodChannel) {
       try {
         final dynamic result = await _methodChannel.invokeMethod('storeFiles', {
           'serverHost': serverHost,
@@ -835,7 +838,7 @@ class DcmtkFlutter {
     required String aeTitle,
     required String storageDir,
   }) async {
-    if (Platform.isIOS) {
+    if (_useMethodChannel) {
       try {
         final dynamic result = await _methodChannel.invokeMethod('startStoreSCP', {
           'port': port,
@@ -851,7 +854,7 @@ class DcmtkFlutter {
   }
 
   Future<Map<String, dynamic>> stopStoreSCP() async {
-    if (Platform.isIOS) {
+    if (_useMethodChannel) {
       try {
         final dynamic result = await _methodChannel.invokeMethod('stopStoreSCP');
         return Map<String, dynamic>.from(result as Map);
@@ -863,7 +866,7 @@ class DcmtkFlutter {
   }
 
   Future<Map<String, dynamic>> getStoreSCPStatus() async {
-    if (Platform.isIOS) {
+    if (_useMethodChannel) {
       try {
         final dynamic result = await _methodChannel.invokeMethod('getStoreSCPStatus');
         return Map<String, dynamic>.from(result as Map);
@@ -886,7 +889,7 @@ class DcmtkFlutter {
     required String localStoragePath,
     int moveSCPPort = 11113,
   }) async {
-    if (Platform.isIOS) {
+    if (_useMethodChannel) {
       try {
         final dynamic result = await _methodChannel.invokeMethod('moveInstances', {
           'serverHost': serverHost,
@@ -947,7 +950,7 @@ class DcmtkFlutter {
   /// Build a 3D volume from a series of DICOM files.
   /// Returns volume metadata including volumeId for subsequent calls.
   Future<Map<String, dynamic>?> buildMprVolume(List<String> filePaths) async {
-    if (Platform.isIOS || Platform.isAndroid) {
+    if (_useMethodChannel) {
       try {
         final dynamic result = await _methodChannel.invokeMethod('buildMprVolume', {
           'filePaths': filePaths,
@@ -966,7 +969,7 @@ class DcmtkFlutter {
     double windowCenter = 0,
     double windowWidth = 0,
   }) async {
-    if (Platform.isIOS || Platform.isAndroid) {
+    if (_useMethodChannel) {
       try {
         final dynamic result = await _methodChannel.invokeMethod('getMprSlice', {
           'volumeId': volumeId,
@@ -985,7 +988,7 @@ class DcmtkFlutter {
 
   /// Free a previously built MPR volume to release memory.
   Future<void> freeMprVolume(int volumeId) async {
-    if (Platform.isIOS || Platform.isAndroid) {
+    if (_useMethodChannel) {
       await _methodChannel.invokeMethod('freeMprVolume', {
         'volumeId': volumeId,
       });
@@ -1002,7 +1005,7 @@ class DcmtkFlutter {
     double windowCenter = 0,
     double windowWidth = 0,
   }) async {
-    if (Platform.isIOS || Platform.isAndroid) {
+    if (_useMethodChannel) {
       final result = await _methodChannel.invokeMethod<Map>('renderMip', {
         'volumeId': volumeId,
         'rotationX': rotationX,

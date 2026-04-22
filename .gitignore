@@ -112,6 +112,7 @@ oficonv/apps/mkcsmapper
 oficonv/apps/mkesdb
 /build_mobile/android
 /build_mobile/ios
+/build_mobile/macos
 
 /flutter_plugin/.dart_tool
 /flutter_plugin/example/.dart_tool
@@ -126,3 +127,5 @@ oficonv/apps/mkesdb
 /flutter_plugin/android/src/main/cpp/include/
 /flutter_plugin/android/src/main/jniLibs/
 /flutter_plugin/ios/Frameworks/
+/flutter_plugin/macos/Libs/
+/flutter_plugin/macos/Headers/
