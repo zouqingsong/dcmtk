@@ -311,4 +311,15 @@ DEVICE_HEADERS_DIR="$BUILD_DIR/OS/install/include"
 if [ -d "$DEVICE_HEADERS_DIR" ]; then
     cp -R "$DEVICE_HEADERS_DIR"/* "$HEADERS_DIR/"
     echo "Headers copied to: $HEADERS_DIR"
+    
+    # Sanitize machine-specific paths in osconfig.h
+    IOS_OSCONFIG="$HEADERS_DIR/dcmtk/config/osconfig.h"
+    if [ -f "$IOS_OSCONFIG" ]; then
+        sed -i.bak \
+            -e 's|"'"$BUILD_DIR"'/OS/install[^"]*"|""|g' \
+            -e 's|"'"$PROJECT_ROOT"'[^"]*"|""|g' \
+            "$IOS_OSCONFIG"
+        rm -f "$IOS_OSCONFIG.bak"
+        echo "Sanitized machine-specific paths in osconfig.h"
+    fi
 fi

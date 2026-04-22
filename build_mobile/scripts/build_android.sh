@@ -112,6 +112,17 @@ for ABI in "${ANDROID_ABIS[@]}"; do
     mkdir -p "$INCLUDE_DIR"
     cp -R "$ABI_BUILD_DIR/install/include/dcmtk" "$INCLUDE_DIR/"
     
+    # Sanitize machine-specific paths in osconfig.h
+    OSCONFIG="$INCLUDE_DIR/dcmtk/config/osconfig.h"
+    if [ -f "$OSCONFIG" ]; then
+        sed -i.bak \
+            -e 's|"'"$ABI_BUILD_DIR"'/install[^"]*"|""|g' \
+            -e 's|"'"$PROJECT_ROOT"'[^"]*"|""|g' \
+            "$OSCONFIG"
+        rm -f "$OSCONFIG.bak"
+        echo "Sanitized machine-specific paths in osconfig.h"
+    fi
+    
     # Copy OpenSSL headers if available
     if [ -d "$OPENSSL_ABI_DIR/include/openssl" ]; then
         cp -R "$OPENSSL_ABI_DIR/include/openssl" "$INCLUDE_DIR/"
