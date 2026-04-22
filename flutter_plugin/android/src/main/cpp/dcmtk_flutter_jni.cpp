@@ -941,3 +941,273 @@ extern "C" JNIEXPORT jboolean JNICALL
 Java_com_dcmtk_flutter_DcmtkFlutterPlugin_nativeIsTlsEnabled(JNIEnv *env, jobject) {
     return dcmtk_is_tls_enabled() ? JNI_TRUE : JNI_FALSE;
 }
+
+// ==================== MPR / MIP ====================
+
+extern "C" JNIEXPORT jobject JNICALL
+Java_com_dcmtk_flutter_DcmtkFlutterPlugin_nativeBuildMprVolume(JNIEnv *env, jobject,
+        jobjectArray filePaths) {
+    int fileCount = env->GetArrayLength(filePaths);
+    const char** cPaths = new const char*[fileCount];
+    jstring* jPaths = new jstring[fileCount];
+    for (int i = 0; i < fileCount; i++) {
+        jPaths[i] = (jstring) env->GetObjectArrayElement(filePaths, i);
+        cPaths[i] = env->GetStringUTFChars(jPaths[i], nullptr);
+    }
+
+    MprVolumeInfo* info = dcmtk_build_mpr_volume(cPaths, fileCount);
+
+    for (int i = 0; i < fileCount; i++) {
+        env->ReleaseStringUTFChars(jPaths[i], cPaths[i]);
+    }
+    delete[] cPaths;
+    delete[] jPaths;
+
+    jclass hashMapClass = env->FindClass("java/util/HashMap");
+    jmethodID hashMapInit = env->GetMethodID(hashMapClass, "<init>", "()V");
+    jmethodID hashMapPut = env->GetMethodID(hashMapClass, "put",
+            "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;");
+    jobject resultMap = env->NewObject(hashMapClass, hashMapInit);
+
+    if (info->error) {
+        env->CallObjectMethod(resultMap, hashMapPut, env->NewStringUTF("error"),
+                safeNewStringUTF(env, info->error_message));
+        dcmtk_free_mpr_volume_info(info);
+        return resultMap;
+    }
+
+    jclass integerClass = env->FindClass("java/lang/Integer");
+    jmethodID intValueOf = env->GetStaticMethodID(integerClass, "valueOf", "(I)Ljava/lang/Integer;");
+    jclass doubleClass = env->FindClass("java/lang/Double");
+    jmethodID doubleValueOf = env->GetStaticMethodID(doubleClass, "valueOf", "(D)Ljava/lang/Double;");
+
+    env->CallObjectMethod(resultMap, hashMapPut, env->NewStringUTF("volumeId"),
+            env->CallStaticObjectMethod(integerClass, intValueOf, info->volume_id));
+    env->CallObjectMethod(resultMap, hashMapPut, env->NewStringUTF("width"),
+            env->CallStaticObjectMethod(integerClass, intValueOf, info->width));
+    env->CallObjectMethod(resultMap, hashMapPut, env->NewStringUTF("height"),
+            env->CallStaticObjectMethod(integerClass, intValueOf, info->height));
+    env->CallObjectMethod(resultMap, hashMapPut, env->NewStringUTF("depth"),
+            env->CallStaticObjectMethod(integerClass, intValueOf, info->depth));
+    env->CallObjectMethod(resultMap, hashMapPut, env->NewStringUTF("pixelSpacingX"),
+            env->CallStaticObjectMethod(doubleClass, doubleValueOf, info->pixel_spacing_x));
+    env->CallObjectMethod(resultMap, hashMapPut, env->NewStringUTF("pixelSpacingY"),
+            env->CallStaticObjectMethod(doubleClass, doubleValueOf, info->pixel_spacing_y));
+    env->CallObjectMethod(resultMap, hashMapPut, env->NewStringUTF("sliceSpacing"),
+            env->CallStaticObjectMethod(doubleClass, doubleValueOf, info->slice_spacing));
+    env->CallObjectMethod(resultMap, hashMapPut, env->NewStringUTF("windowCenter"),
+            env->CallStaticObjectMethod(doubleClass, doubleValueOf, info->window_center));
+    env->CallObjectMethod(resultMap, hashMapPut, env->NewStringUTF("windowWidth"),
+            env->CallStaticObjectMethod(doubleClass, doubleValueOf, info->window_width));
+
+    dcmtk_free_mpr_volume_info(info);
+    return resultMap;
+}
+
+extern "C" JNIEXPORT jobject JNICALL
+Java_com_dcmtk_flutter_DcmtkFlutterPlugin_nativeGetMprSlice(JNIEnv *env, jobject,
+        jint volumeId, jint plane, jint sliceIndex, jdouble windowCenter, jdouble windowWidth) {
+
+    MprSliceData* slice = dcmtk_get_mpr_slice(volumeId, plane, sliceIndex, windowCenter, windowWidth);
+
+    jclass hashMapClass = env->FindClass("java/util/HashMap");
+    jmethodID hashMapInit = env->GetMethodID(hashMapClass, "<init>", "()V");
+    jmethodID hashMapPut = env->GetMethodID(hashMapClass, "put",
+            "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;");
+    jobject resultMap = env->NewObject(hashMapClass, hashMapInit);
+
+    if (slice->error) {
+        env->CallObjectMethod(resultMap, hashMapPut, env->NewStringUTF("error"),
+                safeNewStringUTF(env, slice->error_message));
+        dcmtk_free_mpr_slice_data(slice);
+        return resultMap;
+    }
+
+    jclass integerClass = env->FindClass("java/lang/Integer");
+    jmethodID intValueOf = env->GetStaticMethodID(integerClass, "valueOf", "(I)Ljava/lang/Integer;");
+
+    int dataLen = slice->width * slice->height * 4;
+    jbyteArray byteArray = env->NewByteArray(dataLen);
+    env->SetByteArrayRegion(byteArray, 0, dataLen, (jbyte*)slice->data);
+
+    env->CallObjectMethod(resultMap, hashMapPut, env->NewStringUTF("data"), byteArray);
+    env->CallObjectMethod(resultMap, hashMapPut, env->NewStringUTF("width"),
+            env->CallStaticObjectMethod(integerClass, intValueOf, slice->width));
+    env->CallObjectMethod(resultMap, hashMapPut, env->NewStringUTF("height"),
+            env->CallStaticObjectMethod(integerClass, intValueOf, slice->height));
+
+    dcmtk_free_mpr_slice_data(slice);
+    return resultMap;
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_dcmtk_flutter_DcmtkFlutterPlugin_nativeFreeMprVolume(JNIEnv *env, jobject, jint volumeId) {
+    dcmtk_free_mpr_volume(volumeId);
+}
+
+extern "C" JNIEXPORT jobject JNICALL
+Java_com_dcmtk_flutter_DcmtkFlutterPlugin_nativeRenderMip(JNIEnv *env, jobject,
+        jint volumeId, jdouble rotationX, jdouble rotationY, jdouble windowCenter, jdouble windowWidth) {
+
+    MprSliceData* mip = dcmtk_render_mip(volumeId, rotationX, rotationY, windowCenter, windowWidth);
+
+    jclass hashMapClass = env->FindClass("java/util/HashMap");
+    jmethodID hashMapInit = env->GetMethodID(hashMapClass, "<init>", "()V");
+    jmethodID hashMapPut = env->GetMethodID(hashMapClass, "put",
+            "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;");
+    jobject resultMap = env->NewObject(hashMapClass, hashMapInit);
+
+    if (mip->error) {
+        env->CallObjectMethod(resultMap, hashMapPut, env->NewStringUTF("error"),
+                safeNewStringUTF(env, mip->error_message));
+        dcmtk_free_mpr_slice_data(mip);
+        return resultMap;
+    }
+
+    jclass integerClass = env->FindClass("java/lang/Integer");
+    jmethodID intValueOf = env->GetStaticMethodID(integerClass, "valueOf", "(I)Ljava/lang/Integer;");
+
+    int dataLen = mip->width * mip->height * 4;
+    jbyteArray byteArray = env->NewByteArray(dataLen);
+    env->SetByteArrayRegion(byteArray, 0, dataLen, (jbyte*)mip->data);
+
+    env->CallObjectMethod(resultMap, hashMapPut, env->NewStringUTF("data"), byteArray);
+    env->CallObjectMethod(resultMap, hashMapPut, env->NewStringUTF("width"),
+            env->CallStaticObjectMethod(integerClass, intValueOf, mip->width));
+    env->CallObjectMethod(resultMap, hashMapPut, env->NewStringUTF("height"),
+            env->CallStaticObjectMethod(integerClass, intValueOf, mip->height));
+
+    dcmtk_free_mpr_slice_data(mip);
+    return resultMap;
+}
+
+// ==================== GSPS ====================
+
+extern "C" JNIEXPORT jobject JNICALL
+Java_com_dcmtk_flutter_DcmtkFlutterPlugin_nativeCreateGsps(JNIEnv *env, jobject,
+        jstring sourceDicomPath, jstring annotationsJson, jstring outputPath) {
+    const char *src = jstringToChar(env, sourceDicomPath);
+    const char *json = jstringToChar(env, annotationsJson);
+    const char *out = jstringToChar(env, outputPath);
+
+    MediaUploadResult* gspsResult = dcmtk_create_gsps(src, json, out);
+
+    releaseString(env, sourceDicomPath, src);
+    releaseString(env, annotationsJson, json);
+    releaseString(env, outputPath, out);
+
+    jclass hashMapClass = env->FindClass("java/util/HashMap");
+    jmethodID hashMapInit = env->GetMethodID(hashMapClass, "<init>", "()V");
+    jmethodID hashMapPut = env->GetMethodID(hashMapClass, "put",
+            "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;");
+    jobject resultMap = env->NewObject(hashMapClass, hashMapInit);
+
+    jclass booleanClass = env->FindClass("java/lang/Boolean");
+    jmethodID boolValueOf = env->GetStaticMethodID(booleanClass, "valueOf", "(Z)Ljava/lang/Boolean;");
+
+    env->CallObjectMethod(resultMap, hashMapPut, env->NewStringUTF("success"),
+            env->CallStaticObjectMethod(booleanClass, boolValueOf, gspsResult->success ? JNI_TRUE : JNI_FALSE));
+
+    if (!gspsResult->success) {
+        env->CallObjectMethod(resultMap, hashMapPut, env->NewStringUTF("error"),
+                safeNewStringUTF(env, gspsResult->error_message));
+    } else {
+        env->CallObjectMethod(resultMap, hashMapPut, env->NewStringUTF("studyInstanceUID"),
+                safeNewStringUTF(env, gspsResult->study_instance_uid));
+        env->CallObjectMethod(resultMap, hashMapPut, env->NewStringUTF("seriesInstanceUID"),
+                safeNewStringUTF(env, gspsResult->series_instance_uid));
+        env->CallObjectMethod(resultMap, hashMapPut, env->NewStringUTF("sopInstanceUID"),
+                safeNewStringUTF(env, gspsResult->sop_instance_uid));
+    }
+
+    dcmtk_free_media_upload_result(gspsResult);
+    return resultMap;
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_com_dcmtk_flutter_DcmtkFlutterPlugin_nativeParseGsps(JNIEnv *env, jobject, jstring filePath) {
+    const char *path = jstringToChar(env, filePath);
+    char* jsonStr = dcmtk_parse_gsps(path);
+    releaseString(env, filePath, path);
+    if (jsonStr) {
+        jstring jResult = env->NewStringUTF(jsonStr);
+        free(jsonStr);
+        return jResult;
+    }
+    return nullptr;
+}
+
+// ==================== Convert Image to DICOM ====================
+
+extern "C" JNIEXPORT jobject JNICALL
+Java_com_dcmtk_flutter_DcmtkFlutterPlugin_nativeConvertImageToDicom(JNIEnv *env, jobject,
+        jstring imagePath, jstring outputPath, jstring patientId, jstring patientName,
+        jstring patientBirthDate, jstring studyDescription, jstring seriesDescription,
+        jstring imageComments, jstring modality, jstring studyInstanceUID,
+        jstring seriesInstanceUID, jint instanceNumber) {
+
+    const char *cImagePath = jstringToChar(env, imagePath);
+    const char *cOutputPath = jstringToChar(env, outputPath);
+    const char *cPatientId = jstringToChar(env, patientId);
+    const char *cPatientName = jstringToChar(env, patientName);
+    const char *cBirthDate = jstringToChar(env, patientBirthDate);
+    const char *cStudyDesc = jstringToChar(env, studyDescription);
+    const char *cSeriesDesc = jstringToChar(env, seriesDescription);
+    const char *cComments = jstringToChar(env, imageComments);
+    const char *cModality = jstringToChar(env, modality);
+    const char *cStudyUID = jstringToChar(env, studyInstanceUID);
+    const char *cSeriesUID = jstringToChar(env, seriesInstanceUID);
+
+    MediaUploadResult* convResult = dcmtk_convert_image_to_dicom(
+        cImagePath, cOutputPath,
+        cPatientId ? cPatientId : "",
+        cPatientName ? cPatientName : "",
+        cBirthDate ? cBirthDate : "",
+        cStudyDesc ? cStudyDesc : "Exported Image",
+        cSeriesDesc ? cSeriesDesc : "Exported Series",
+        cComments ? cComments : "",
+        cModality ? cModality : "SC",
+        cStudyUID ? cStudyUID : "",
+        cSeriesUID ? cSeriesUID : "",
+        instanceNumber
+    );
+
+    releaseString(env, imagePath, cImagePath);
+    releaseString(env, outputPath, cOutputPath);
+    releaseString(env, patientId, cPatientId);
+    releaseString(env, patientName, cPatientName);
+    releaseString(env, patientBirthDate, cBirthDate);
+    releaseString(env, studyDescription, cStudyDesc);
+    releaseString(env, seriesDescription, cSeriesDesc);
+    releaseString(env, imageComments, cComments);
+    releaseString(env, modality, cModality);
+    releaseString(env, studyInstanceUID, cStudyUID);
+    releaseString(env, seriesInstanceUID, cSeriesUID);
+
+    jclass hashMapClass = env->FindClass("java/util/HashMap");
+    jmethodID hashMapInit = env->GetMethodID(hashMapClass, "<init>", "()V");
+    jmethodID hashMapPut = env->GetMethodID(hashMapClass, "put",
+            "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;");
+    jobject resultMap = env->NewObject(hashMapClass, hashMapInit);
+
+    jclass booleanClass = env->FindClass("java/lang/Boolean");
+    jmethodID boolValueOf = env->GetStaticMethodID(booleanClass, "valueOf", "(Z)Ljava/lang/Boolean;");
+
+    env->CallObjectMethod(resultMap, hashMapPut, env->NewStringUTF("success"),
+            env->CallStaticObjectMethod(booleanClass, boolValueOf, convResult->success ? JNI_TRUE : JNI_FALSE));
+
+    if (!convResult->success) {
+        env->CallObjectMethod(resultMap, hashMapPut, env->NewStringUTF("error"),
+                safeNewStringUTF(env, convResult->error_message));
+    } else {
+        env->CallObjectMethod(resultMap, hashMapPut, env->NewStringUTF("studyInstanceUID"),
+                safeNewStringUTF(env, convResult->study_instance_uid));
+        env->CallObjectMethod(resultMap, hashMapPut, env->NewStringUTF("seriesInstanceUID"),
+                safeNewStringUTF(env, convResult->series_instance_uid));
+        env->CallObjectMethod(resultMap, hashMapPut, env->NewStringUTF("sopInstanceUID"),
+                safeNewStringUTF(env, convResult->sop_instance_uid));
+    }
+
+    dcmtk_free_media_upload_result(convResult);
+    return resultMap;
+}

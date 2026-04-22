@@ -493,7 +493,7 @@
 /* #undef WITH_OPENJPEG */
 
 /* Define if we are compiling with OpenSSL support */
-/* #undef WITH_OPENSSL */
+#define WITH_OPENSSL
 
 /* Define if we are compiling for built-in private tag dictionary */
 /* #undef ENABLE_PRIVATE_TAGS */
@@ -741,22 +741,22 @@ DCMTK was configured to use C++20 features, but your compiler does not or was no
 /* #undef HAVE_OPENSSL_PROTOTYPE_RAND_EGD */
 
 /* Define if we have OpenSSL with the HAVE_OPENSSL_PROTOTYPE_NID_DSA_WITH_SHA512 macro */
-/* #undef HAVE_OPENSSL_PROTOTYPE_NID_DSA_WITH_SHA512 */
+#define HAVE_OPENSSL_PROTOTYPE_NID_DSA_WITH_SHA512 1
 
 /* Define if we have OpenSSL with the HAVE_OPENSSL_PROTOTYPE_NID_ECDSA_WITH_SHA3_256 macro */
-/* #undef HAVE_OPENSSL_PROTOTYPE_NID_ECDSA_WITH_SHA3_256 */
+#define HAVE_OPENSSL_PROTOTYPE_NID_ECDSA_WITH_SHA3_256 1
 
 /* Define if we have OpenSSL with the HAVE_OPENSSL_PROTOTYPE_NID_SHA512_256WITHRSAENCRYPTION macro */
-/* #undef HAVE_OPENSSL_PROTOTYPE_NID_SHA512_256WITHRSAENCRYPTION */
+#define HAVE_OPENSSL_PROTOTYPE_NID_SHA512_256WITHRSAENCRYPTION 1
 
 /* Define if we have OpenSSL with the SSL_CTX_set0_tmp_dh_pkey() function */
-/* #undef HAVE_OPENSSL_PROTOTYPE_SSL_CTX_SET0_TMP_DH_PKEY */
+#define HAVE_OPENSSL_PROTOTYPE_SSL_CTX_SET0_TMP_DH_PKEY 1
 
 /* Define if we have OpenSSL with the SSL_CTX_set1_sigalgs() function */
-/* #undef HAVE_OPENSSL_PROTOTYPE_SSL_CTX_SET1_SIGALGS */
+#define HAVE_OPENSSL_PROTOTYPE_SSL_CTX_SET1_SIGALGS 1
 
 /* Define if we have OpenSSL with the TLS1_TXT_ECDHE_ECDSA_WITH_AES_256_CCM_8 macro */
-/* #undef HAVE_OPENSSL_PROTOTYPE_TLS1_TXT_ECDHE_ECDSA_WITH_AES_256_CCM_8 */
+#define HAVE_OPENSSL_PROTOTYPE_TLS1_TXT_ECDHE_ECDSA_WITH_AES_256_CCM_8 1
 
 /* Define if we have OpenSSL with the TLS1_TXT_ECDHE_ECDSA_WITH_CAMELLIA_256_GCM_SHA384 macro */
 /* #undef HAVE_OPENSSL_PROTOTYPE_TLS1_TXT_ECDHE_ECDSA_WITH_CAMELLIA_256_GCM_SHA384 */
@@ -765,16 +765,16 @@ DCMTK was configured to use C++20 features, but your compiler does not or was no
 /* #undef HAVE_OPENSSL_PROTOTYPE_TS_VERIFY_CTX_SET0_STORE */
 
 /* Define if we have OpenSSL with the new typedef of EVP_MD_CTX as struct evp_md_ctx_st */
-/* #undef HAVE_OPENSSL_DECLARATION_NEW_EVP_MD_CTX */
+#define HAVE_OPENSSL_DECLARATION_NEW_EVP_MD_CTX 1
 
 /* Define if we have OpenSSL with the EVP_PKEY_get_group_name() function */
-/* #undef HAVE_OPENSSL_PROTOTYPE_EVP_PKEY_GET_GROUP_NAME */
+#define HAVE_OPENSSL_PROTOTYPE_EVP_PKEY_GET_GROUP_NAME 1
 
 /* Define if we have OpenSSL with the OSSL_PROVIDER_load() function */
-/* #undef HAVE_OPENSSL_PROTOTYPE_OSSL_PROVIDER_LOAD */
+#define HAVE_OPENSSL_PROTOTYPE_OSSL_PROVIDER_LOAD 1
 
 /* Define if we have the <openssl/provider.h> header file*/
-/* #undef HAVE_OPENSSL_PROVIDER_H */
+#define HAVE_OPENSSL_PROVIDER_H 1
 
 /* Historical C/C++ language features and APIs that are guaranteed by C++98,
  * C99, or POSIX.1-2001 for Posix platforms, or are not used anywhere in DCMTK,

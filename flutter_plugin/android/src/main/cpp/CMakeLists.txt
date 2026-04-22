@@ -52,3 +52,15 @@ target_link_libraries(dcmtk_flutter
     ${DCMTK_LIB_DIR}/liboflog.a
     ${DCMTK_LIB_DIR}/libofstd.a
     z)
+
+# Link OpenSSL if available
+if(EXISTS "${DCMTK_LIB_DIR}/libssl.a")
+    target_link_libraries(dcmtk_flutter
+        ${DCMTK_LIB_DIR}/libssl.a
+        ${DCMTK_LIB_DIR}/libcrypto.a)
+    target_include_directories(dcmtk_flutter PRIVATE
+        ${DCMTK_INCLUDE_DIR})
+    message(STATUS "OpenSSL found - TLS support enabled")
+else()
+    message(STATUS "OpenSSL not found - TLS support disabled")
+endif()

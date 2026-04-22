@@ -36,7 +36,7 @@ set(DCMTK_WITH_TIFF OFF CACHE BOOL "Disable TIFF support for mobile" FORCE)
 set(DCMTK_WITH_PNG OFF CACHE BOOL "Disable PNG support for mobile" FORCE)
 set(DCMTK_WITH_XML OFF CACHE BOOL "Disable XML support for mobile" FORCE)
 set(DCMTK_WITH_ZLIB ON CACHE BOOL "Enable ZLIB support" FORCE)
-set(DCMTK_WITH_OPENSSL OFF CACHE BOOL "Disable OpenSSL for mobile" FORCE)
+# OpenSSL: controlled by build script via -D flags, do not force here
 set(DCMTK_WITH_SNDFILE OFF CACHE BOOL "Disable SNDFILE support" FORCE)
 set(DCMTK_WITH_ICONV OFF CACHE BOOL "Disable ICONV for mobile" FORCE)
 set(DCMTK_WITH_WRAP OFF CACHE BOOL "Disable WRAP support" FORCE)

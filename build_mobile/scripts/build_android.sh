@@ -26,6 +26,15 @@ if [ -z "$ANDROID_SDK_ROOT" ]; then
     echo "ANDROID_SDK_ROOT not set, inferred: $ANDROID_SDK_ROOT"
 fi
 
+# Build OpenSSL for Android first (if not already built)
+OPENSSL_SCRIPT="$SCRIPT_DIR/build_openssl_android.sh"
+if [ -f "$OPENSSL_SCRIPT" ]; then
+    echo "Building OpenSSL for Android..."
+    bash "$OPENSSL_SCRIPT"
+fi
+
+OPENSSL_ROOT="$PROJECT_ROOT/build_mobile/android/openssl/install"
+
 # Android ABIs to build for
 ANDROID_ABIS=("arm64-v8a")
 
@@ -35,6 +44,17 @@ for ABI in "${ANDROID_ABIS[@]}"; do
     ABI_BUILD_DIR="$BUILD_DIR/$ABI"
     rm -rf "$ABI_BUILD_DIR"
     mkdir -p "$ABI_BUILD_DIR"
+    
+    # Check if OpenSSL is available for this ABI
+    OPENSSL_ABI_DIR="$OPENSSL_ROOT/$ABI"
+    OPENSSL_FLAGS=""
+    if [ -f "$OPENSSL_ABI_DIR/lib/libssl.a" ]; then
+        echo "OpenSSL found for $ABI, enabling TLS support"
+        OPENSSL_FLAGS="-DDCMTK_WITH_OPENSSL=ON -DOPENSSL_ROOT_DIR=$OPENSSL_ABI_DIR -DOPENSSL_INCLUDE_DIR=$OPENSSL_ABI_DIR/include -DOPENSSL_SSL_LIBRARY=$OPENSSL_ABI_DIR/lib/libssl.a -DOPENSSL_CRYPTO_LIBRARY=$OPENSSL_ABI_DIR/lib/libcrypto.a"
+    else
+        echo "OpenSSL not found for $ABI, building without TLS"
+        OPENSSL_FLAGS="-DDCMTK_WITH_OPENSSL=OFF"
+    fi
     
     cd "$ABI_BUILD_DIR"
     
@@ -57,7 +77,7 @@ for ABI in "${ANDROID_ABIS[@]}"; do
         -DDCMTK_WITH_PNG=OFF \
         -DDCMTK_WITH_XML=OFF \
         -DDCMTK_WITH_ZLIB=ON \
-        -DDCMTK_WITH_OPENSSL=OFF \
+        $OPENSSL_FLAGS \
         -DDCMTK_WITH_SNDFILE=OFF \
         -DDCMTK_WITH_ICONV=OFF \
         -DDCMTK_WITH_WRAP=OFF \
@@ -80,10 +100,23 @@ for ABI in "${ANDROID_ABIS[@]}"; do
     mkdir -p "$PLUGIN_JNI_DIR"
     find "$ABI_BUILD_DIR/install/lib" -name "*.a" -exec cp {} "$PLUGIN_JNI_DIR/" \;
     
+    # Copy OpenSSL libraries if available
+    if [ -f "$OPENSSL_ABI_DIR/lib/libssl.a" ]; then
+        cp "$OPENSSL_ABI_DIR/lib/libssl.a" "$PLUGIN_JNI_DIR/"
+        cp "$OPENSSL_ABI_DIR/lib/libcrypto.a" "$PLUGIN_JNI_DIR/"
+        echo "OpenSSL libraries copied to $PLUGIN_JNI_DIR"
+    fi
+    
     # Copy headers (same across ABIs)
     INCLUDE_DIR="$PROJECT_ROOT/flutter_plugin/android/src/main/cpp/include"
     mkdir -p "$INCLUDE_DIR"
     cp -R "$ABI_BUILD_DIR/install/include/dcmtk" "$INCLUDE_DIR/"
+    
+    # Copy OpenSSL headers if available
+    if [ -d "$OPENSSL_ABI_DIR/include/openssl" ]; then
+        cp -R "$OPENSSL_ABI_DIR/include/openssl" "$INCLUDE_DIR/"
+        echo "OpenSSL headers copied"
+    fi
     
     echo "Completed build for $ABI"
 done

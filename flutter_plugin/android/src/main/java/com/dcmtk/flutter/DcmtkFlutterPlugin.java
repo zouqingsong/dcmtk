@@ -48,6 +48,13 @@ public class DcmtkFlutterPlugin implements FlutterPlugin, MethodCallHandler {
   private native void nativeClearTlsConfig();
   private native boolean nativeIsTlsAvailable();
   private native boolean nativeIsTlsEnabled();
+  private native HashMap<String, Object> nativeBuildMprVolume(String[] filePaths);
+  private native HashMap<String, Object> nativeGetMprSlice(int volumeId, int plane, int sliceIndex, double windowCenter, double windowWidth);
+  private native void nativeFreeMprVolume(int volumeId);
+  private native HashMap<String, Object> nativeRenderMip(int volumeId, double rotationX, double rotationY, double windowCenter, double windowWidth);
+  private native HashMap<String, Object> nativeCreateGsps(String sourceDicomPath, String annotationsJson, String outputPath);
+  private native String nativeParseGsps(String filePath);
+  private native HashMap<String, Object> nativeConvertImageToDicom(String imagePath, String outputPath, String patientId, String patientName, String patientBirthDate, String studyDescription, String seriesDescription, String imageComments, String modality, String studyInstanceUID, String seriesInstanceUID, int instanceNumber);
 
   @Override
   public void onAttachedToEngine(@NonNull FlutterPluginBinding flutterPluginBinding) {
@@ -134,9 +141,25 @@ public class DcmtkFlutterPlugin implements FlutterPlugin, MethodCallHandler {
         result.success(nativeIsTlsEnabled());
         break;
       case "buildMprVolume":
+        handleBuildMprVolume(call, result);
+        break;
       case "getMprSlice":
+        handleGetMprSlice(call, result);
+        break;
       case "freeMprVolume":
-        result.error("NOT_IMPLEMENTED", "MPR not yet supported on Android", null);
+        handleFreeMprVolume(call, result);
+        break;
+      case "renderMip":
+        handleRenderMip(call, result);
+        break;
+      case "createGsps":
+        handleCreateGsps(call, result);
+        break;
+      case "parseGsps":
+        handleParseGsps(call, result);
+        break;
+      case "convertImageToDicom":
+        handleConvertImageToDicom(call, result);
         break;
       default:
         result.notImplemented();
@@ -553,6 +576,172 @@ public class DcmtkFlutterPlugin implements FlutterPlugin, MethodCallHandler {
   private void handleClearTlsConfig(MethodCall call, Result result) {
     nativeClearTlsConfig();
     result.success(true);
+  }
+
+  // ==================== MPR / MIP ====================
+
+  @SuppressWarnings("unchecked")
+  private void handleBuildMprVolume(MethodCall call, Result result) {
+    List<String> filePaths = call.argument("filePaths");
+    if (filePaths == null || filePaths.size() < 3) {
+      result.error("INVALID_ARGUMENT", "Need at least 3 file paths for MPR", null);
+      return;
+    }
+    String[] pathsArray = filePaths.toArray(new String[0]);
+
+    new Thread(() -> {
+      HashMap<String, Object> volResult = nativeBuildMprVolume(pathsArray);
+      runOnMainThread(() -> {
+        if (volResult.containsKey("error")) {
+          result.error("MPR_ERROR", (String) volResult.get("error"), null);
+          return;
+        }
+        result.success(volResult);
+      });
+    }).start();
+  }
+
+  private void handleGetMprSlice(MethodCall call, Result result) {
+    Number volumeId = call.argument("volumeId");
+    Number plane = call.argument("plane");
+    Number sliceIndex = call.argument("sliceIndex");
+    Number windowCenter = call.argument("windowCenter");
+    Number windowWidth = call.argument("windowWidth");
+    if (volumeId == null || plane == null || sliceIndex == null) {
+      result.error("INVALID_ARGUMENT", "volumeId, plane, and sliceIndex are required", null);
+      return;
+    }
+    int vid = volumeId.intValue();
+    int pl = plane.intValue();
+    int si = sliceIndex.intValue();
+    double wc = windowCenter != null ? windowCenter.doubleValue() : 0;
+    double ww = windowWidth != null ? windowWidth.doubleValue() : 0;
+
+    new Thread(() -> {
+      HashMap<String, Object> sliceResult = nativeGetMprSlice(vid, pl, si, wc, ww);
+      runOnMainThread(() -> {
+        if (sliceResult.containsKey("error")) {
+          result.error("MPR_ERROR", (String) sliceResult.get("error"), null);
+          return;
+        }
+        result.success(sliceResult);
+      });
+    }).start();
+  }
+
+  private void handleFreeMprVolume(MethodCall call, Result result) {
+    Number volumeId = call.argument("volumeId");
+    if (volumeId != null) {
+      nativeFreeMprVolume(volumeId.intValue());
+    }
+    result.success(null);
+  }
+
+  private void handleRenderMip(MethodCall call, Result result) {
+    Number volumeId = call.argument("volumeId");
+    Number rotationX = call.argument("rotationX");
+    Number rotationY = call.argument("rotationY");
+    Number windowCenter = call.argument("windowCenter");
+    Number windowWidth = call.argument("windowWidth");
+    if (volumeId == null) {
+      result.error("INVALID_ARGUMENT", "volumeId is required", null);
+      return;
+    }
+    int vid = volumeId.intValue();
+    double rx = rotationX != null ? rotationX.doubleValue() : 0;
+    double ry = rotationY != null ? rotationY.doubleValue() : 0;
+    double wc = windowCenter != null ? windowCenter.doubleValue() : 0;
+    double ww = windowWidth != null ? windowWidth.doubleValue() : 0;
+
+    new Thread(() -> {
+      HashMap<String, Object> mipResult = nativeRenderMip(vid, rx, ry, wc, ww);
+      runOnMainThread(() -> {
+        if (mipResult.containsKey("error")) {
+          result.error("MIP_ERROR", (String) mipResult.get("error"), null);
+          return;
+        }
+        result.success(mipResult);
+      });
+    }).start();
+  }
+
+  // ==================== GSPS ====================
+
+  private void handleCreateGsps(MethodCall call, Result result) {
+    String sourceDicomPath = call.argument("sourceDicomPath");
+    String annotationsJson = call.argument("annotationsJson");
+    String outputPath = call.argument("outputPath");
+    if (sourceDicomPath == null || annotationsJson == null || outputPath == null) {
+      result.error("INVALID_ARGUMENT", "sourceDicomPath, annotationsJson, and outputPath are required", null);
+      return;
+    }
+
+    new Thread(() -> {
+      HashMap<String, Object> gspsResult = nativeCreateGsps(sourceDicomPath, annotationsJson, outputPath);
+      runOnMainThread(() -> {
+        if (gspsResult.containsKey("error")) {
+          result.error("GSPS_ERROR", (String) gspsResult.get("error"), null);
+          return;
+        }
+        result.success(gspsResult);
+      });
+    }).start();
+  }
+
+  private void handleParseGsps(MethodCall call, Result result) {
+    String filePath = call.argument("filePath");
+    if (filePath == null) {
+      result.error("INVALID_ARGUMENT", "filePath is required", null);
+      return;
+    }
+
+    new Thread(() -> {
+      String jsonStr = nativeParseGsps(filePath);
+      runOnMainThread(() -> result.success(jsonStr));
+    }).start();
+  }
+
+  // ==================== Convert Image to DICOM ====================
+
+  private void handleConvertImageToDicom(MethodCall call, Result result) {
+    String imagePath = call.argument("imagePath");
+    String outputPath = call.argument("outputPath");
+    String patientId = call.argument("patientId");
+    String patientName = call.argument("patientName");
+    String patientBirthDate = call.argument("patientBirthDate");
+    String studyDescription = call.argument("studyDescription");
+    String seriesDescription = call.argument("seriesDescription");
+    String imageComments = call.argument("imageComments");
+    String modality = call.argument("modality");
+    String studyInstanceUID = call.argument("studyInstanceUID");
+    String seriesInstanceUID = call.argument("seriesInstanceUID");
+    Number instanceNumber = call.argument("instanceNumber");
+    if (imagePath == null || outputPath == null) {
+      result.error("INVALID_ARGUMENT", "imagePath and outputPath are required", null);
+      return;
+    }
+    int instNum = instanceNumber != null ? instanceNumber.intValue() : 1;
+
+    new Thread(() -> {
+      HashMap<String, Object> convResult = nativeConvertImageToDicom(imagePath, outputPath,
+              patientId != null ? patientId : "",
+              patientName != null ? patientName : "",
+              patientBirthDate != null ? patientBirthDate : "",
+              studyDescription != null ? studyDescription : "Exported Image",
+              seriesDescription != null ? seriesDescription : "Exported Series",
+              imageComments != null ? imageComments : "",
+              modality != null ? modality : "SC",
+              studyInstanceUID != null ? studyInstanceUID : "",
+              seriesInstanceUID != null ? seriesInstanceUID : "",
+              instNum);
+      runOnMainThread(() -> {
+        if (convResult.containsKey("error")) {
+          result.error("CONVERSION_ERROR", (String) convResult.get("error"), null);
+          return;
+        }
+        result.success(convResult);
+      });
+    }).start();
   }
 
   private void runOnMainThread(Runnable runnable) {
