@@ -129,3 +129,7 @@ oficonv/apps/mkesdb
 /flutter_plugin/ios/Frameworks/
 /flutter_plugin/macos/Libs/
 /flutter_plugin/macos/Headers/
+/build_windows
+/flutter_plugin/android/.gradle
+/flutter_plugin/windows/Headers
+/flutter_plugin/windows/Libs

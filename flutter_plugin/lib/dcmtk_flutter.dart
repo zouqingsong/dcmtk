@@ -22,8 +22,8 @@ class DcmtkFlutter {
   // Method channel (for iOS and macOS)
   static const MethodChannel _methodChannel = MethodChannel('dcmtk_flutter');
 
-  /// Whether the current platform uses MethodChannel (iOS/macOS)
-  bool get _useMethodChannel => Platform.isIOS || Platform.isMacOS;
+  /// Whether the current platform uses MethodChannel (iOS/macOS/Windows)
+  bool get _useMethodChannel => Platform.isIOS || Platform.isMacOS || Platform.isWindows;
 
   DcmtkFlutter._internal() {
     if (Platform.isAndroid) {
@@ -35,7 +35,7 @@ class DcmtkFlutter {
           .lookup<NativeFunction<_FreeStringNative>>('dcmtk_free_string')
           .asFunction();
     } else if (_useMethodChannel) {
-      // iOS and macOS use MethodChannel
+      // iOS, macOS, and Windows use MethodChannel
       _dylib = null;
       _loadDicomFile = null;
       _freeString = null;

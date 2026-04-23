@@ -1,5 +1,5 @@
 name: dcmtk_flutter
-description: DCMTK (DICOM toolkit) Flutter plugin for iOS and Android
+description: DCMTK (DICOM toolkit) Flutter plugin for iOS, Android, macOS, and Windows
 version: 1.0.0
 homepage: https://github.com/zouqingsong/dcmtk
 
@@ -17,6 +17,8 @@ flutter:
         pluginClass: DcmtkFlutterPlugin
       macos:
         pluginClass: DcmtkFlutterPlugin
+      windows:
+        pluginClass: DcmtkFlutterPluginCApi
 
 dependencies:
   flutter:

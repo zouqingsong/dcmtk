@@ -1,4 +1,5 @@
 #include "dcmtk_flutter_wrapper.h"
+#define _USE_MATH_DEFINES
 #include <dcmtk/dcmdata/dctk.h>
 #include <dcmtk/dcmdata/dcdict.h>
 #include <dcmtk/dcmdata/dcfilefo.h>
@@ -32,7 +33,13 @@
 #include <map>
 #include <cmath>
 #include <sys/stat.h>
+#if defined(_WIN32)
+#include <windows.h>
+#include <direct.h>
+#define stat _stat
+#else
 #include <dirent.h>
+#endif
 
 // Simple debug logging using printf which should appear in Flutter console
 #define DEBUG_LOG(...) do { \
@@ -447,7 +454,7 @@ DicomImageData* dcmtk_extract_image(const char* filename, int frame_index, doubl
             DEBUG_LOG("Multi-frame image with missing attribute - trying direct pixel data access");
             
             // Get basic image parameters
-            Uint16 rows, cols, bitsAlloc = 8, samplesPerPixel = 1;
+            Uint16 rows = 0, cols = 0, bitsAlloc = 8, samplesPerPixel = 1;
             if (dataset->findAndGetUint16(DCM_Rows, rows).good() && 
                 dataset->findAndGetUint16(DCM_Columns, cols).good()) {
                 
@@ -471,9 +478,9 @@ DicomImageData* dcmtk_extract_image(const char* filename, int frame_index, doubl
                     if (result->data) {
                         // Try to get raw pixel data
                         Uint8* pixelData = nullptr;
-                        OFCondition status = pixelDataElement->getUint8Array(pixelData);
+                        OFCondition getStatus = pixelDataElement->getUint8Array(pixelData);
                         
-                        if (status.good() && pixelData != nullptr) {
+                        if (getStatus.good() && pixelData != nullptr) {
                             unsigned long pixelDataLength = pixelDataElement->getLength();
                             DEBUG_LOG("Got raw pixel data, length: %lu, needed per frame: %lu", pixelDataLength, pixel_count);
                             
@@ -3457,11 +3464,39 @@ static const char* g_otherStorageSopClasses[] = {
 };
 static const int g_numOtherStorageSopClasses = sizeof(g_otherStorageSopClasses) / sizeof(g_otherStorageSopClasses[0]);
 
+} // end extern "C" — C++ helper functions follow
+
+// Helper: cross-platform mkdir
+static void cross_platform_mkdir(const char* path) {
+#if defined(_WIN32)
+    _mkdir(path);
+#else
+    mkdir(path, 0755);
+#endif
+}
+
 // Helper: scan directory for DICOM files and return their paths.
 // DcmSCU's handleSTORERequest saves files WITHOUT .dcm extension (e.g. "SC.1.2.3..."),
 // so we scan all regular files and verify each is a valid DICOM file.
 static std::vector<std::string> scanDirectoryForDcmFiles(const std::string& dirPath) {
     std::vector<std::string> files;
+#if defined(_WIN32)
+    std::string searchPath = dirPath + "\\*";
+    WIN32_FIND_DATAA findData;
+    HANDLE hFind = FindFirstFileA(searchPath.c_str(), &findData);
+    if (hFind == INVALID_HANDLE_VALUE) return files;
+    do {
+        std::string name = findData.cFileName;
+        if (name.empty() || name[0] == '.') continue;
+        if (findData.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
+        std::string fullPath = dirPath + "\\" + name;
+        DcmFileFormat dcmFile;
+        if (dcmFile.loadFile(fullPath.c_str()).good()) {
+            files.push_back(fullPath);
+        }
+    } while (FindNextFileA(hFind, &findData));
+    FindClose(hFind);
+#else
     DIR* dir = opendir(dirPath.c_str());
     if (!dir) return files;
     struct dirent* entry;
@@ -3483,9 +3518,12 @@ static std::vector<std::string> scanDirectoryForDcmFiles(const std::string& dirP
         }
     }
     closedir(dir);
+#endif
     std::sort(files.begin(), files.end());
     return files;
 }
+
+extern "C" {
 
 // C-GET implementation - retrieve instances from server via C-GET, with C-FIND fallback on separate association
 DicomInstanceQueryResult* dcmtk_download_instances(const char* server_host, int server_port, const char* ae_title, const char* called_ae_title, const char* series_instance_uid, const char* local_storage_path) {
@@ -3499,8 +3537,8 @@ DicomInstanceQueryResult* dcmtk_download_instances(const char* server_host, int 
     
     // Use a per-series subdirectory to avoid mixing files from different downloads
     std::string seriesDir = std::string(local_storage_path) + "/" + series_instance_uid;
-    mkdir(local_storage_path, 0755);
-    mkdir(seriesDir.c_str(), 0755);
+    cross_platform_mkdir(local_storage_path);
+    cross_platform_mkdir(seriesDir.c_str());
     
     // Transfer syntaxes for image storage (non-video)
     OFList<OFString> imageStorageTSList;
@@ -3678,6 +3716,27 @@ DicomInstanceQueryResult* dcmtk_download_instances(const char* server_host, int 
         
         // Debug: list all files in the storage directory
         {
+#if defined(_WIN32)
+            std::string searchPath = seriesDir + "\\*";
+            WIN32_FIND_DATAA findData;
+            HANDLE hFind = FindFirstFileA(searchPath.c_str(), &findData);
+            int fileCount = 0;
+            if (hFind != INVALID_HANDLE_VALUE) {
+                do {
+                    std::string n = findData.cFileName;
+                    if (n[0] == '.') continue;
+                    std::string fp = seriesDir + "\\" + n;
+                    bool isDir = (findData.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
+                    long fsize = (long)((((ULONGLONG)findData.nFileSizeHigh) << 32) | findData.nFileSizeLow);
+                    DEBUG_LOG("  Storage dir file: %s (size=%ld, isDir=%d)", n.c_str(), fsize, isDir ? 1 : 0);
+                    fileCount++;
+                } while (FindNextFileA(hFind, &findData));
+                FindClose(hFind);
+                DEBUG_LOG("  Total files in storage dir: %d", fileCount);
+            } else {
+                DEBUG_LOG("  ERROR: Cannot open storage dir: %s", seriesDir.c_str());
+            }
+#else
             DIR* dbgDir = opendir(seriesDir.c_str());
             if (dbgDir) {
                 struct dirent* dbgEntry;
@@ -3697,6 +3756,7 @@ DicomInstanceQueryResult* dcmtk_download_instances(const char* server_host, int 
             } else {
                 DEBUG_LOG("  ERROR: Cannot open storage dir: %s", seriesDir.c_str());
             }
+#endif
         }
         
         // Check if C-GET produced any files
@@ -4249,7 +4309,7 @@ int dcmtk_start_store_scp(int port, const char* ae_title, const char* storage_di
     // Create storage directory
     struct stat st;
     if (stat(storage_dir, &st) != 0) {
-        mkdir(storage_dir, 0755);
+        cross_platform_mkdir(storage_dir);
     }
 
     if (g_scp_storage_dir) free(g_scp_storage_dir);
@@ -4374,12 +4434,12 @@ DicomInstanceQueryResult* dcmtk_move_instances(const char* server_host, int serv
     // Create storage directory
     struct stat st;
     if (stat(local_storage_path, &st) != 0) {
-        mkdir(local_storage_path, 0755);
+        cross_platform_mkdir(local_storage_path);
     }
 
     // First, start a temporary SCP to receive the moved instances
     // We'll collect files after the SCP finishes
-    int prev_received = g_scp_received_count;
+    (void)g_scp_received_count; // may be used for future diagnostics
 
     try {
         DcmSCU scu;
@@ -4470,17 +4530,32 @@ DicomInstanceQueryResult* dcmtk_move_instances(const char* server_host, int serv
 
         // Collect files that were stored by the SCP
         // (files should now be in local_storage_path if SCP was running)
-        DIR* dir = opendir(local_storage_path);
-        if (dir) {
+        {
             std::vector<std::string> filePaths;
-            struct dirent* entry;
-            while ((entry = readdir(dir)) != nullptr) {
-                std::string name = entry->d_name;
-                if (name.length() > 4 && name.substr(name.length() - 4) == ".dcm") {
-                    filePaths.push_back(std::string(local_storage_path) + "/" + name);
-                }
+#if defined(_WIN32)
+            std::string searchPath = std::string(local_storage_path) + "\\*.dcm";
+            WIN32_FIND_DATAA findData;
+            HANDLE hFind = FindFirstFileA(searchPath.c_str(), &findData);
+            if (hFind != INVALID_HANDLE_VALUE) {
+                do {
+                    std::string name = findData.cFileName;
+                    filePaths.push_back(std::string(local_storage_path) + "\\" + name);
+                } while (FindNextFileA(hFind, &findData));
+                FindClose(hFind);
             }
-            closedir(dir);
+#else
+            DIR* dir = opendir(local_storage_path);
+            if (dir) {
+                struct dirent* entry;
+                while ((entry = readdir(dir)) != nullptr) {
+                    std::string name = entry->d_name;
+                    if (name.length() > 4 && name.substr(name.length() - 4) == ".dcm") {
+                        filePaths.push_back(std::string(local_storage_path) + "/" + name);
+                    }
+                }
+                closedir(dir);
+            }
+#endif
 
             if (!filePaths.empty()) {
                 result->instance_count = (int)filePaths.size();
