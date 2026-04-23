@@ -36,7 +36,7 @@ target_link_libraries(${PLUGIN_NAME} PRIVATE flutter flutter_wrapper_plugin)
 # === DCMTK Configuration ===
 # Pre-built DCMTK headers and libraries for Windows
 set(DCMTK_HEADERS_DIR "${CMAKE_CURRENT_SOURCE_DIR}/Headers")
-set(DCMTK_LIBS_DIR "${CMAKE_CURRENT_SOURCE_DIR}/Libs")
+set(DCMTK_LIBS_BASE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/Libs")
 
 # Include DCMTK headers
 target_include_directories(${PLUGIN_NAME} PRIVATE
@@ -59,14 +59,18 @@ target_compile_definitions(${PLUGIN_NAME} PRIVATE
   DCMTK_INSIDE_LOG4CPLUS=1
 )
 
-# Link pre-built DCMTK static libraries
-# These are built by build_mobile/scripts/build_windows.sh or manually via CMake
-file(GLOB DCMTK_LIBRARIES "${DCMTK_LIBS_DIR}/*.lib")
+# Link pre-built DCMTK static libraries (config-specific)
+# Glob from Release dir to get the list of lib names, then link using generator expression
+file(GLOB DCMTK_LIB_NAMES RELATIVE "${DCMTK_LIBS_BASE_DIR}/Release" "${DCMTK_LIBS_BASE_DIR}/Release/*.lib")
 
-if(DCMTK_LIBRARIES)
-  target_link_libraries(${PLUGIN_NAME} PRIVATE ${DCMTK_LIBRARIES})
+if(DCMTK_LIB_NAMES)
+  foreach(LIB_NAME ${DCMTK_LIB_NAMES})
+    target_link_libraries(${PLUGIN_NAME} PRIVATE
+      "$<IF:$<CONFIG:Debug>,${DCMTK_LIBS_BASE_DIR}/Debug/${LIB_NAME},${DCMTK_LIBS_BASE_DIR}/Release/${LIB_NAME}>"
+    )
+  endforeach()
 else()
-  message(WARNING "No DCMTK libraries found in ${DCMTK_LIBS_DIR}. "
+  message(WARNING "No DCMTK libraries found in ${DCMTK_LIBS_BASE_DIR}/Release. "
     "Build DCMTK first: see build_mobile/scripts/build_windows.ps1")
 endif()
 

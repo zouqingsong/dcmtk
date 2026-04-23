@@ -106,7 +106,9 @@ void DcmtkFlutterPlugin::HandleMethodCall(
   const auto& method = method_call.method_name();
   const auto* args = std::get_if<EncodableMap>(method_call.arguments());
 
-  if (!args && method != "getPlatformVersion") {
+  if (!args && method != "getPlatformVersion" &&
+      method != "clearTlsConfig" && method != "isTlsAvailable" &&
+      method != "isTlsEnabled") {
     result->Error("INVALID_ARGUMENT", "Arguments must be a map");
     return;
   }

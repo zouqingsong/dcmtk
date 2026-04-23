@@ -12,7 +12,6 @@
 #   flutter_plugin/windows/Headers/      — DCMTK headers
 
 param(
-    [string]$BuildType = "Release",
     [string]$Generator = "Visual Studio 17 2022",
     [switch]$WithOpenSSL,
     [string]$OpenSSLRoot = ""
@@ -27,12 +26,15 @@ $PluginDir = Join-Path $DcmtkRoot "flutter_plugin\windows"
 $LibsDir = Join-Path $PluginDir "Libs"
 $HeadersDir = Join-Path $PluginDir "Headers"
 
+# Build both Release and Debug so flutter run (Debug) and flutter build (Release) both work
+$BuildTypes = @("Release", "Debug")
+
 Write-Host "=== DCMTK Windows Build ===" -ForegroundColor Cyan
 Write-Host "DCMTK Root:  $DcmtkRoot"
 Write-Host "Build Dir:   $BuildDir"
 Write-Host "Output Libs: $LibsDir"
 Write-Host "Output Hdrs: $HeadersDir"
-Write-Host "Build Type:  $BuildType"
+Write-Host "Configs:     $($BuildTypes -join ', ')"
 Write-Host "Generator:   $Generator"
 Write-Host ""
 
@@ -51,6 +53,11 @@ foreach ($dir in @($LibsDir, $HeadersDir)) {
     New-Item -ItemType Directory -Path $dir -Force | Out-Null
 }
 
+# Create per-config lib directories
+foreach ($bt in $BuildTypes) {
+    New-Item -ItemType Directory -Path (Join-Path $LibsDir $bt) -Force | Out-Null
+}
+
 # CMake configure
 Write-Host "`n=== CMake Configure ===" -ForegroundColor Cyan
 $cmakeArgs = @(
@@ -58,7 +65,6 @@ $cmakeArgs = @(
     "-B", $BuildDir,
     "-G", $Generator,
     "-A", "x64",
-    "-DCMAKE_BUILD_TYPE=$BuildType",
     "-DBUILD_SHARED_LIBS=OFF",
     "-DBUILD_APPS=OFF",
     "-DBUILD_TESTING=OFF",
@@ -87,24 +93,27 @@ if ($WithOpenSSL -and $OpenSSLRoot) {
 & cmake @cmakeArgs
 if ($LASTEXITCODE -ne 0) { throw "CMake configure failed" }
 
-# CMake build
-Write-Host "`n=== CMake Build ===" -ForegroundColor Cyan
-& cmake --build $BuildDir --config $BuildType --parallel
-if ($LASTEXITCODE -ne 0) { throw "CMake build failed" }
-
-# Collect static libraries
-Write-Host "`n=== Collecting Libraries ===" -ForegroundColor Cyan
-$libs = Get-ChildItem -Path $BuildDir -Recurse -Filter "*.lib" | Where-Object {
-    # Skip CMake internal libs and test libs
-    $_.FullName -notmatch "CMakeFiles" -and
-    $_.FullName -notmatch "INSTALL" -and
-    $_.DirectoryName -match $BuildType
+# CMake build (both Release and Debug)
+foreach ($bt in $BuildTypes) {
+    Write-Host "`n=== CMake Build ($bt) ===" -ForegroundColor Cyan
+    & cmake --build $BuildDir --config $bt --parallel
+    if ($LASTEXITCODE -ne 0) { throw "CMake build ($bt) failed" }
 }
 
-foreach ($lib in $libs) {
-    $destPath = Join-Path $LibsDir $lib.Name
-    Copy-Item $lib.FullName -Destination $destPath -Force
-    Write-Host "  Copied: $($lib.Name)"
+# Collect static libraries (per-config)
+Write-Host "`n=== Collecting Libraries ===" -ForegroundColor Cyan
+foreach ($bt in $BuildTypes) {
+    $configLibsDir = Join-Path $LibsDir $bt
+    $libs = Get-ChildItem -Path $BuildDir -Recurse -Filter "*.lib" | Where-Object {
+        $_.FullName -notmatch "CMakeFiles" -and
+        $_.FullName -notmatch "INSTALL" -and
+        $_.DirectoryName -match "\\$bt$"
+    }
+    foreach ($lib in $libs) {
+        $destPath = Join-Path $configLibsDir $lib.Name
+        Copy-Item $lib.FullName -Destination $destPath -Force
+        Write-Host "  Copied ($bt): $($lib.Name)"
+    }
 }
 
 # Collect headers
@@ -146,9 +155,10 @@ foreach ($module in $modules) {
 }
 
 # Summary
-$libCount = (Get-ChildItem -Path $LibsDir -Filter "*.lib").Count
+$releaseCount = (Get-ChildItem -Path (Join-Path $LibsDir "Release") -Filter "*.lib").Count
+$debugCount = (Get-ChildItem -Path (Join-Path $LibsDir "Debug") -Filter "*.lib").Count
 Write-Host "`n=== Build Complete ===" -ForegroundColor Green
-Write-Host "Libraries: $libCount .lib files in $LibsDir"
+Write-Host "Libraries: $releaseCount Release + $debugCount Debug .lib files in $LibsDir"
 Write-Host "Headers:   $HeadersDir"
 Write-Host ""
 Write-Host "Next steps:" -ForegroundColor Yellow

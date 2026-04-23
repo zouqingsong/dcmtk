@@ -3535,9 +3535,8 @@ DicomInstanceQueryResult* dcmtk_download_instances(const char* server_host, int 
     result->error = 0;
     result->error_message = NULL;
     
-    // Use a per-series subdirectory to avoid mixing files from different downloads
-    std::string seriesDir = std::string(local_storage_path) + "/" + series_instance_uid;
-    cross_platform_mkdir(local_storage_path);
+    // The caller already includes the series UID in local_storage_path
+    std::string seriesDir = std::string(local_storage_path);
     cross_platform_mkdir(seriesDir.c_str());
     
     // Transfer syntaxes for image storage (non-video)
@@ -4004,6 +4003,13 @@ VideoExtractionResult* dcmtk_extract_video(const char* dicom_path, const char* o
 
     // Write video data to output file
     // Item 0 is the offset table, items 1..N are the actual video fragments
+    // Ensure parent directory exists
+    std::string outPathStr(output_path);
+    size_t lastSep = outPathStr.find_last_of("/\\");
+    if (lastSep != std::string::npos) {
+        std::string parentDir = outPathStr.substr(0, lastSep);
+        cross_platform_mkdir(parentDir.c_str());
+    }
     FILE* outFile = fopen(output_path, "wb");
     if (!outFile) {
         std::string err = "Cannot create output file: ";
