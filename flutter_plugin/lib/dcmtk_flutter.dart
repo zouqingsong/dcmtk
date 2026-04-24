@@ -22,8 +22,8 @@ class DcmtkFlutter {
   // Method channel (for iOS and macOS)
   static const MethodChannel _methodChannel = MethodChannel('dcmtk_flutter');
 
-  /// Whether the current platform uses MethodChannel (iOS/macOS/Windows)
-  bool get _useMethodChannel => Platform.isIOS || Platform.isMacOS || Platform.isWindows;
+  /// Whether the current platform uses MethodChannel (iOS/macOS/Windows/Linux)
+  bool get _useMethodChannel => Platform.isIOS || Platform.isMacOS || Platform.isWindows || Platform.isLinux;
 
   DcmtkFlutter._internal() {
     if (Platform.isAndroid) {
