@@ -93,11 +93,11 @@ extern "C" {
     } DicomInstanceQueryResult;
     
     typedef struct {
-        char* patient_id;
-        char* patient_name;
-        char* patient_birth_date;
-        char* patient_sex;
-        char* patient_comments;
+      const char* patient_id;
+      const char* patient_name;
+      const char* patient_birth_date;
+      const char* patient_sex;
+      const char* patient_comments;
     } PatientInfo;
     
     typedef struct {
@@ -215,6 +215,9 @@ extern "C" {
     void dcmtk_free_mpr_slice_data(MprSliceData* data);
     MprSliceData* dcmtk_render_mip(int volume_id, double rotation_x_deg, double rotation_y_deg,
                                     double window_center, double window_width);
+    MprSliceData* dcmtk_render_volume(int volume_id, double rotation_x_deg, double rotation_y_deg,
+                       double window_center, double window_width,
+                       const char* preset_name, int preview_mode);
 #ifdef __cplusplus
 }
 #endif
@@ -239,7 +242,7 @@ extern "C" {
     }
     
     const char* cFilePath = [filePath UTF8String];
-    const char* resultStr = dcmtk_load_dicom_file(cFilePath);
+    char* resultStr = dcmtk_load_dicom_file(cFilePath);
     
     NSString* resultNSString = [NSString stringWithUTF8String:resultStr];
     dcmtk_free_string(resultStr);
@@ -1245,9 +1248,9 @@ extern "C" {
   // === MPR Volume ===
   } else if ([@"buildMprVolume" isEqualToString:call.method]) {
     NSArray<NSString*>* filePaths = call.arguments[@"filePaths"];
-    if (filePaths == nil || filePaths.count < 3) {
+    if (filePaths == nil || filePaths.count < 1) {
       result([FlutterError errorWithCode:@"INVALID_ARGUMENT"
-                                 message:@"Need at least 3 file paths for MPR"
+                                 message:@"Need at least 1 file path for MPR"
                                  details:nil]);
       return;
     }
@@ -1367,6 +1370,53 @@ extern "C" {
           @"data": pixelData,
         };
         dcmtk_free_mpr_slice_data(mip);
+        result(dict);
+      });
+    });
+
+  } else if ([@"renderVolume" isEqualToString:call.method]) {
+    NSNumber* volumeId = call.arguments[@"volumeId"];
+    NSNumber* rotationX = call.arguments[@"rotationX"];
+    NSNumber* rotationY = call.arguments[@"rotationY"];
+    NSNumber* windowCenter = call.arguments[@"windowCenter"];
+    NSNumber* windowWidth = call.arguments[@"windowWidth"];
+    NSString* preset = call.arguments[@"preset"];
+    NSNumber* preview = call.arguments[@"preview"];
+    if (volumeId == nil) {
+      result([FlutterError errorWithCode:@"INVALID_ARGUMENT"
+                                 message:@"volumeId is required"
+                                 details:nil]);
+      return;
+    }
+    int vid = [volumeId intValue];
+    double rx = rotationX ? [rotationX doubleValue] : 0;
+    double ry = rotationY ? [rotationY doubleValue] : 0;
+    double wc = windowCenter ? [windowCenter doubleValue] : 0;
+    double ww = windowWidth ? [windowWidth doubleValue] : 0;
+    // Capture NSString (not const char*) so ARC keeps it alive across dispatch_async
+    NSString* capturedPreset = preset ? preset : @"Muscle";
+    int previewMode = preview ? ([preview boolValue] ? 1 : 0) : 0;
+    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+      const char* presetName = [capturedPreset UTF8String];
+      MprSliceData* volume = dcmtk_render_volume(vid, rx, ry, wc, ww, presetName, previewMode);
+      dispatch_async(dispatch_get_main_queue(), ^{
+        if (volume->error) {
+          NSString* errMsg = volume->error_message ?
+              [NSString stringWithUTF8String:volume->error_message] : @"Unknown volume rendering error";
+          dcmtk_free_mpr_slice_data(volume);
+          result([FlutterError errorWithCode:@"VOLUME_RENDER_ERROR" message:errMsg details:nil]);
+          return;
+        }
+        int dataLen = volume->width * volume->height * 4;
+        FlutterStandardTypedData* pixelData =
+            [FlutterStandardTypedData typedDataWithBytes:
+                [NSData dataWithBytes:volume->data length:dataLen]];
+        NSDictionary* dict = @{
+          @"width": @(volume->width),
+          @"height": @(volume->height),
+          @"data": pixelData,
+        };
+        dcmtk_free_mpr_slice_data(volume);
         result(dict);
       });
     });

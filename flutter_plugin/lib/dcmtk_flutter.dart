@@ -1019,6 +1019,39 @@ class DcmtkFlutter {
     }
     return null;
   }
+
+  /// Render a color volume image from a loaded volume using a preset transfer function.
+  /// Returns a map with 'width', 'height', and 'data' (RGBA Uint8List), or null on error.
+  Future<Map<String, dynamic>?> renderVolume(
+    int volumeId, {
+    double rotationX = 0,
+    double rotationY = 0,
+    double windowCenter = 0,
+    double windowWidth = 0,
+    String preset = 'Muscle',
+    bool preview = false,
+  }) async {
+    if (_useMethodChannel) {
+      try {
+        final result = await _methodChannel.invokeMethod<Map>('renderVolume', {
+          'volumeId': volumeId,
+          'rotationX': rotationX,
+          'rotationY': rotationY,
+          'windowCenter': windowCenter,
+          'windowWidth': windowWidth,
+          'preset': preset,
+          'preview': preview,
+        });
+        if (result != null) {
+          return Map<String, dynamic>.from(result);
+        }
+      } on PlatformException catch (e) {
+        print('[renderVolume] PlatformException: ${e.code} - ${e.message}');
+        return null;
+      }
+    }
+    return null;
+  }
 }
 
 class DicomPatient {

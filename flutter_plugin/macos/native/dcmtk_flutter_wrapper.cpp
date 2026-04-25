@@ -4649,6 +4649,110 @@ static inline uint8_t applyMprWindow(int16_t val, double center, double width) {
     return (uint8_t)((val - minVal) / width * 255.0);
 }
 
+static inline double clamp01(double v) {
+    return std::max(0.0, std::min(1.0, v));
+}
+
+static inline double smoothstep(double edge0, double edge1, double x) {
+    if (edge0 == edge1) return x < edge0 ? 0.0 : 1.0;
+    double t = clamp01((x - edge0) / (edge1 - edge0));
+    return t * t * (3.0 - 2.0 * t);
+}
+
+struct VolumeTransferSample {
+    double r;
+    double g;
+    double b;
+    double a;
+};
+
+static inline VolumeTransferSample makeVolumeSample(double r, double g, double b, double a) {
+    VolumeTransferSample sample = {r, g, b, a};
+    return sample;
+}
+
+static VolumeTransferSample sampleVolumePreset(int16_t hu, uint8_t gray, const char* preset_name) {
+    const std::string preset = preset_name ? preset_name : "Muscle";
+    const double wlNorm = clamp01(gray / 255.0);
+
+    // Hard cutoff: suppress dark background voxels for both CT (air) and MR (zero signal).
+    // Gray < 12/255 (~5%) means the voxel is at the dark edge of the window – treat as transparent.
+    if (wlNorm < 0.047) return makeVolumeSample(0, 0, 0, 0);
+
+    if (preset == "Bone") {
+        // Use gray-based gate so bone is only visible for bright voxels
+        const double bone = smoothstep(180.0, 1200.0, hu) * smoothstep(0.35, 0.55, wlNorm);
+        const double alpha = bone * (0.04 + 0.28 * wlNorm);
+        const double tint = smoothstep(350.0, 1600.0, hu);
+        return makeVolumeSample(
+            0.82 + 0.16 * tint,
+            0.74 + 0.18 * tint,
+            0.64 + 0.24 * tint,
+            alpha);
+    }
+
+    if (preset == "MR Brain") {
+        // MR datasets are not HU-calibrated. Use a gray-domain transfer that
+        // suppresses dark background while preserving soft-tissue surfaces.
+        const double tissueGate = smoothstep(0.10, 0.32, wlNorm) * (1.0 - smoothstep(0.94, 1.00, wlNorm));
+        const double edgeBoost = smoothstep(0.22, 0.68, wlNorm);
+        const double alpha = tissueGate * (0.03 + 0.18 * edgeBoost);
+        return makeVolumeSample(
+            0.74 + 0.20 * edgeBoost,
+            0.62 + 0.24 * edgeBoost,
+            0.58 + 0.22 * edgeBoost,
+            alpha);
+    }
+
+    if (preset == "Soft Tissue") {
+        // Gate on gray so very dark regions (background) don't get colored
+        const double grayGate = smoothstep(0.08, 0.25, wlNorm) * (1.0 - smoothstep(0.80, 0.95, wlNorm));
+        const double band = smoothstep(-180.0, -20.0, hu) * (1.0 - smoothstep(180.0, 380.0, hu));
+        const double tint = smoothstep(-40.0, 120.0, hu);
+        const double alpha = grayGate * band * (0.02 + 0.14 * wlNorm);
+        return makeVolumeSample(
+            0.64 + 0.18 * tint,
+            0.46 + 0.16 * tint,
+            0.40 + 0.12 * tint,
+            alpha);
+    }
+
+    if (preset == "Lung") {
+        const double lungBand = smoothstep(-980.0, -760.0, hu) * (1.0 - smoothstep(-420.0, -250.0, hu));
+        const double gate = smoothstep(0.10, 0.45, wlNorm) * (1.0 - smoothstep(0.90, 0.99, wlNorm));
+        const double alpha = gate * lungBand * (0.03 + 0.16 * wlNorm);
+        const double tint = smoothstep(-900.0, -450.0, hu);
+        return makeVolumeSample(
+            0.55 + 0.20 * tint,
+            0.72 + 0.20 * tint,
+            0.84 + 0.12 * tint,
+            alpha);
+    }
+
+    if (preset == "Vessel") {
+        const double vesselBand = smoothstep(120.0, 280.0, hu) * (1.0 - smoothstep(900.0, 1400.0, hu));
+        const double gate = smoothstep(0.20, 0.60, wlNorm);
+        const double alpha = gate * vesselBand * (0.05 + 0.24 * wlNorm);
+        const double tint = smoothstep(200.0, 700.0, hu);
+        return makeVolumeSample(
+            0.88 + 0.10 * tint,
+            0.32 + 0.20 * tint,
+            0.26 + 0.10 * tint,
+            alpha);
+    }
+
+    // Muscle (default) – also works reasonably for MR brain tissue
+    const double grayGate = smoothstep(0.08, 0.28, wlNorm) * (1.0 - smoothstep(0.82, 0.96, wlNorm));
+    const double band = smoothstep(-80.0, 10.0, hu) * (1.0 - smoothstep(130.0, 260.0, hu));
+    const double tint = smoothstep(-10.0, 90.0, hu);
+    const double alpha = grayGate * band * (0.03 + 0.18 * wlNorm);
+    return makeVolumeSample(
+        0.45 + 0.45 * tint,
+        0.10 + 0.36 * tint,
+        0.10 + 0.22 * tint,
+        alpha);
+}
+
 static double dot3(const double* a, const double* b) {
     return a[0]*b[0] + a[1]*b[1] + a[2]*b[2];
 }
@@ -4662,9 +4766,9 @@ static void cross3(const double* a, const double* b, double* out) {
 MprVolumeInfo* dcmtk_build_mpr_volume(const char** file_paths, int file_count) {
     MprVolumeInfo* info = (MprVolumeInfo*)calloc(1, sizeof(MprVolumeInfo));
 
-    if (!file_paths || file_count < 3) {
+    if (!file_paths || file_count < 1) {
         info->error = 1;
-        info->error_message = strdup("Need at least 3 DICOM files for MPR");
+        info->error_message = strdup("Need at least 1 DICOM file for MPR");
         return info;
     }
 
@@ -4674,6 +4778,174 @@ MprVolumeInfo* dcmtk_build_mpr_volume(const char** file_paths, int file_count) {
     DJDecoderRegistration::registerCodecs();
     DJLSDecoderRegistration::registerCodecs();
     DcmRLEDecoderRegistration::registerCodecs();
+
+    // Special case: single-file multi-frame volume.
+    if (file_count == 1 && file_paths[0]) {
+        DcmFileFormat fileFormat;
+        OFCondition status = fileFormat.loadFile(file_paths[0]);
+        if (status.good()) {
+            DcmDataset* dataset = fileFormat.getDataset();
+            if (dataset) {
+                OFString numFramesStr;
+                int frameCount = 1;
+                if (dataset->findAndGetOFString(DCM_NumberOfFrames, numFramesStr).good()) {
+                    frameCount = atoi(numFramesStr.c_str());
+                }
+
+                Uint16 rows = 0, cols = 0, spp = 1, bitsAllocated = 16, pixelRep = 0;
+                dataset->findAndGetUint16(DCM_Rows, rows);
+                dataset->findAndGetUint16(DCM_Columns, cols);
+                dataset->findAndGetUint16(DCM_SamplesPerPixel, spp);
+                dataset->findAndGetUint16(DCM_BitsAllocated, bitsAllocated);
+                dataset->findAndGetUint16(DCM_PixelRepresentation, pixelRep);
+
+                if (frameCount >= 3 && rows > 0 && cols > 0 && spp == 1) {
+                    OFString ps0, ps1, rsStr, riStr, wcStr, wwStr, sbsStr, stStr;
+                    double spacingRow = 1.0, spacingCol = 1.0, sliceSpacing = 1.0;
+                    double rescaleSlope = 1.0, rescaleIntercept = 0.0;
+                    double windowCenter = 40.0, windowWidth = 400.0;
+
+                    if (dataset->findAndGetOFString(DCM_PixelSpacing, ps0, 0).good()) spacingRow = atof(ps0.c_str());
+                    if (dataset->findAndGetOFString(DCM_PixelSpacing, ps1, 1).good()) spacingCol = atof(ps1.c_str());
+                    if (dataset->findAndGetOFString(DCM_SpacingBetweenSlices, sbsStr).good()) sliceSpacing = atof(sbsStr.c_str());
+                    else if (dataset->findAndGetOFString(DCM_SliceThickness, stStr).good()) sliceSpacing = atof(stStr.c_str());
+                    if (sliceSpacing <= 0) sliceSpacing = 1.0;
+                    if (dataset->findAndGetOFString(DCM_RescaleSlope, rsStr).good()) rescaleSlope = atof(rsStr.c_str());
+                    if (dataset->findAndGetOFString(DCM_RescaleIntercept, riStr).good()) rescaleIntercept = atof(riStr.c_str());
+                    if (dataset->findAndGetOFString(DCM_WindowCenter, wcStr).good()) windowCenter = atof(wcStr.c_str());
+                    if (dataset->findAndGetOFString(DCM_WindowWidth, wwStr).good()) windowWidth = atof(wwStr.c_str());
+
+                    const int w = (int)cols;
+                    const int h = (int)rows;
+                    const int depth = frameCount;
+                    const size_t framePixels = (size_t)w * h;
+                    const size_t volumeSize = framePixels * (size_t)depth;
+
+                    int16_t* volumeData = (int16_t*)calloc(volumeSize, sizeof(int16_t));
+                    if (!volumeData) {
+                        info->error = 1;
+                        info->error_message = strdup("Failed to allocate multi-frame volume memory");
+                        return info;
+                    }
+
+                    // Primary path: DicomImage frame-by-frame decode.
+                    // Handles both compressed and uncompressed multi-frame without
+                    // modifying the dataset (chooseRepresentation can corrupt it for
+                    // the subsequent fallback attempt).
+                    bool loaded = false;
+                    {
+                        bool frameDecodeOk = true;
+                        for (int z = 0; z < depth; z++) {
+                            DicomImage* frameImage = new DicomImage(dataset, EXS_Unknown, 0, (unsigned long)z, 1);
+                            if (!frameImage || frameImage->getStatus() != EIS_Normal) {
+                                DEBUG_LOG("DicomImage frame %d failed status=%d", z,
+                                          frameImage ? (int)frameImage->getStatus() : -1);
+                                frameDecodeOk = false;
+                                if (frameImage) delete frameImage;
+                                break;
+                            }
+                            const void* framePixels16 = frameImage->getOutputData(16, 0, 0);
+                            if (!framePixels16) {
+                                DEBUG_LOG("DicomImage frame %d: getOutputData returned null", z);
+                                frameDecodeOk = false;
+                                delete frameImage;
+                                break;
+                            }
+                            int16_t* slicePtr = volumeData + ((size_t)z * framePixels);
+                            const Uint16* framePtr = reinterpret_cast<const Uint16*>(framePixels16);
+                            for (size_t p = 0; p < framePixels; p++) {
+                                int rawVal = (pixelRep == 1) ? (int16_t)framePtr[p] : (uint16_t)framePtr[p];
+                                double val = rawVal * rescaleSlope + rescaleIntercept;
+                                slicePtr[p] = (int16_t)std::max(-32768.0, std::min(32767.0, val));
+                            }
+                            delete frameImage;
+                        }
+                        loaded = frameDecodeOk;
+                    }
+
+                    // Fallback: decompress and use direct array access.
+                    if (!loaded) {
+                        DEBUG_LOG("DicomImage path failed, trying chooseRepresentation fallback");
+                        dataset->chooseRepresentation(EXS_LittleEndianExplicit, NULL);
+                        bool arrayOk = false;
+                        if (bitsAllocated <= 8) {
+                            const Uint8* pixelData = nullptr;
+                            unsigned long pixelLen = 0;
+                            if (dataset->findAndGetUint8Array(DCM_PixelData, pixelData, &pixelLen).good() && pixelData) {
+                                const size_t totalExpected = framePixels * (size_t)depth;
+                                if ((size_t)pixelLen >= totalExpected) {
+                                    for (int z = 0; z < depth; z++) {
+                                        int16_t* slicePtr = volumeData + ((size_t)z * framePixels);
+                                        const Uint8* framePtr = pixelData + ((size_t)z * framePixels);
+                                        for (size_t p = 0; p < framePixels; p++) {
+                                            double val = framePtr[p] * rescaleSlope + rescaleIntercept;
+                                            slicePtr[p] = (int16_t)std::max(-32768.0, std::min(32767.0, val));
+                                        }
+                                    }
+                                    arrayOk = true;
+                                }
+                            }
+                        } else {
+                            const Uint16* pixelData = nullptr;
+                            unsigned long pixelLen = 0;
+                            if (dataset->findAndGetUint16Array(DCM_PixelData, pixelData, &pixelLen).good() && pixelData) {
+                                const size_t totalExpected = framePixels * (size_t)depth;
+                                if ((size_t)pixelLen >= totalExpected) {
+                                    for (int z = 0; z < depth; z++) {
+                                        int16_t* slicePtr = volumeData + ((size_t)z * framePixels);
+                                        const Uint16* framePtr = pixelData + ((size_t)z * framePixels);
+                                        for (size_t p = 0; p < framePixels; p++) {
+                                            int rawVal = (pixelRep == 1) ? (int16_t)framePtr[p] : (uint16_t)framePtr[p];
+                                            double val = rawVal * rescaleSlope + rescaleIntercept;
+                                            slicePtr[p] = (int16_t)std::max(-32768.0, std::min(32767.0, val));
+                                        }
+                                    }
+                                    arrayOk = true;
+                                }
+                            }
+                        }
+                        loaded = arrayOk;
+                    }
+
+                    if (loaded) {
+                        MprVolume* volume = new MprVolume();
+                        volume->data = volumeData;
+                        volume->width = w;
+                        volume->height = h;
+                        volume->depth = depth;
+                        volume->pixelSpacingX = spacingCol;
+                        volume->pixelSpacingY = spacingRow;
+                        volume->sliceSpacing = sliceSpacing;
+                        volume->windowCenter = windowCenter;
+                        volume->windowWidth = windowWidth;
+
+                        int volumeId = g_nextVolumeId++;
+                        g_volumes[volumeId] = volume;
+
+                        info->volume_id = volumeId;
+                        info->width = w;
+                        info->height = h;
+                        info->depth = depth;
+                        info->pixel_spacing_x = spacingCol;
+                        info->pixel_spacing_y = spacingRow;
+                        info->slice_spacing = sliceSpacing;
+                        info->window_center = windowCenter;
+                        info->window_width = windowWidth;
+                        info->error = 0;
+                        info->error_message = nullptr;
+
+                        DEBUG_LOG("MPR volume built from multi-frame: id=%d, %dx%dx%d", volumeId, w, h, depth);
+                        return info;
+                    }
+
+                    free(volumeData);
+                    info->error = 1;
+                    info->error_message = strdup("Failed to load pixel data from multi-frame DICOM");
+                    return info;
+                }
+            }
+        }
+    }
 
     // Phase 1: Load metadata from all files
     struct FileMetadata {
@@ -5060,9 +5332,10 @@ MprSliceData* dcmtk_render_mip(int volume_id, double rotation_x_deg, double rota
     // Bounding sphere radius in mm (for determining output size and ray range)
     double halfDiag = 0.5 * sqrt(extentX * extentX + extentY * extentY + extentZ * extentZ);
 
-    // Output image: scale to roughly match the largest dimension
+    // Output image: keep initial render responsive for large CT volumes.
     double maxDim = std::max({(double)W, (double)H, (double)D});
-    int outSize = (int)std::min(maxDim * 1.2, 512.0); // cap at 512 for performance
+    int outSize = (int)std::min(maxDim * 0.65, 320.0); // cap at 320 for responsiveness
+    if (outSize < 160) outSize = 160;
     int outW = outSize;
     int outH = outSize;
 
@@ -5081,10 +5354,11 @@ MprSliceData* dcmtk_render_mip(int volume_id, double rotation_x_deg, double rota
     double cy = H * 0.5;
     double cz = D * 0.5;
 
-    // Number of samples along each ray (diagonal of volume in voxels, oversampled)
+    // Number of samples along each ray: reduced to keep interaction usable.
     double diagVoxels = sqrt((double)(W * W + H * H + D * D));
-    int numSamples = (int)(diagVoxels * 1.2);
+    int numSamples = (int)(diagVoxels * 0.6);
     if (numSamples < 64) numSamples = 64;
+    if (numSamples > 900) numSamples = 900;
     double stepSize = (2.0 * halfDiag) / numSamples; // mm per step
 
     DEBUG_LOG("MIP render: vol %d, rot=(%.1f,%.1f), out=%dx%d, samples=%d",
@@ -5140,6 +5414,138 @@ MprSliceData* dcmtk_render_mip(int volume_id, double rotation_x_deg, double rota
     result->error_message = nullptr;
 
     DEBUG_LOG("MIP render complete: %dx%d", outW, outH);
+    return result;
+}
+
+MprSliceData* dcmtk_render_volume(int volume_id, double rotation_x_deg, double rotation_y_deg,
+                                  double window_center, double window_width,
+                                  const char* preset_name, int preview_mode) {
+    MprSliceData* result = (MprSliceData*)calloc(1, sizeof(MprSliceData));
+
+    auto it = g_volumes.find(volume_id);
+    if (it == g_volumes.end()) {
+        result->error = 1;
+        result->error_message = strdup("Volume not found");
+        return result;
+    }
+
+    MprVolume* vol = it->second;
+    int W = vol->width;
+    int H = vol->height;
+    int D = vol->depth;
+
+    double wc = (window_width > 0) ? window_center : vol->windowCenter;
+    double ww = (window_width > 0) ? window_width : vol->windowWidth;
+
+    double rx = rotation_x_deg * M_PI / 180.0;
+    double ry = rotation_y_deg * M_PI / 180.0;
+
+    double cosRx = cos(rx), sinRx = sin(rx);
+    double cosRy = cos(ry), sinRy = sin(ry);
+
+    double screenX[3] = { cosRy,   sinRy * sinRx,  sinRy * cosRx };
+    double screenY[3] = { 0.0,     cosRx,         -sinRx          };
+    double rayDir[3]  = {-sinRy,   cosRy * sinRx,  cosRy * cosRx  };
+
+    double sx = vol->pixelSpacingX;
+    double sy = vol->pixelSpacingY;
+    double sz = vol->sliceSpacing;
+
+    double extentX = W * sx;
+    double extentY = H * sy;
+    double extentZ = D * sz;
+    double halfDiag = 0.5 * sqrt(extentX * extentX + extentY * extentY + extentZ * extentZ);
+
+    double maxDim = std::max({(double)W, (double)H, (double)D});
+    int outSize = preview_mode ? (int)std::min(maxDim * 0.55, 224.0) : (int)std::min(maxDim * 0.9, 420.0);
+    if (outSize < 128) outSize = 128;
+    int outW = outSize;
+    int outH = outSize;
+
+    double screenPixelSpacing = (2.0 * halfDiag) / outSize;
+
+    unsigned char* rgba = (unsigned char*)calloc(outW * outH * 4, 1);
+    if (!rgba) {
+        result->error = 1;
+        result->error_message = strdup("Failed to allocate volume image memory");
+        return result;
+    }
+
+    double cx = W * 0.5;
+    double cy = H * 0.5;
+    double cz = D * 0.5;
+
+    double diagVoxels = sqrt((double)(W * W + H * H + D * D));
+    int numSamples = (int)(diagVoxels * (preview_mode ? 0.75 : 1.05));
+    if (numSamples < 72) numSamples = 72;
+    double stepSize = (2.0 * halfDiag) / numSamples;
+
+    DEBUG_LOG("Volume render: vol %d, preset=%s, rot=(%.1f,%.1f), out=%dx%d, samples=%d, preview=%d",
+              volume_id,
+              preset_name ? preset_name : "Muscle",
+              rotation_x_deg,
+              rotation_y_deg,
+              outW,
+              outH,
+              numSamples,
+              preview_mode);
+
+    for (int py = 0; py < outH; py++) {
+        for (int px = 0; px < outW; px++) {
+            double offX = (px - outW * 0.5 + 0.5) * screenPixelSpacing;
+            double offY = (py - outH * 0.5 + 0.5) * screenPixelSpacing;
+
+            double accumR = 0.0;
+            double accumG = 0.0;
+            double accumB = 0.0;
+            double accumA = 0.0;
+
+            for (int s = 0; s < numSamples; s++) {
+                double t = (s - numSamples * 0.5 + 0.5) * stepSize;
+
+                double mx = offX * screenX[0] + offY * screenY[0] + t * rayDir[0];
+                double my = offX * screenX[1] + offY * screenY[1] + t * rayDir[1];
+                double mz = offX * screenX[2] + offY * screenY[2] + t * rayDir[2];
+
+                double vx = mx / sx + cx;
+                double vy = my / sy + cy;
+                double vz = mz / sz + cz;
+
+                int ix = (int)(vx + 0.5);
+                int iy = (int)(vy + 0.5);
+                int iz = (int)(vz + 0.5);
+
+                if (ix < 0 || ix >= W || iy < 0 || iy >= H || iz < 0 || iz >= D)
+                    continue;
+
+                int16_t val = vol->data[(size_t)iz * W * H + iy * W + ix];
+                uint8_t gray = applyMprWindow(val, wc, ww);
+                VolumeTransferSample sample = sampleVolumePreset(val, gray, preset_name);
+                if (sample.a <= 0.001)
+                    continue;
+
+                double remain = 1.0 - accumA;
+                accumR += remain * sample.a * sample.r;
+                accumG += remain * sample.a * sample.g;
+                accumB += remain * sample.a * sample.b;
+                accumA += remain * sample.a;
+                if (accumA >= 0.985)
+                    break;
+            }
+
+            int idx = (py * outW + px) * 4;
+            rgba[idx] = (unsigned char)(clamp01(accumR) * 255.0);
+            rgba[idx + 1] = (unsigned char)(clamp01(accumG) * 255.0);
+            rgba[idx + 2] = (unsigned char)(clamp01(accumB) * 255.0);
+            rgba[idx + 3] = (unsigned char)(clamp01(accumA) * 255.0);
+        }
+    }
+
+    result->data = rgba;
+    result->width = outW;
+    result->height = outH;
+    result->error = 0;
+    result->error_message = nullptr;
     return result;
 }
 

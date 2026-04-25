@@ -277,6 +277,14 @@ void dcmtk_free_mpr_slice_data(MprSliceData* data);
 MprSliceData* dcmtk_render_mip(int volume_id, double rotation_x_deg, double rotation_y_deg,
                                 double window_center, double window_width);
 
+// === 3D Direct Volume Rendering (DVR) ===
+// Render a color volume image from a loaded volume using a preset transfer function.
+// preset_name currently supports "Soft Tissue", "Muscle", and "Bone".
+// preview_mode uses a reduced output size for interactive updates.
+MprSliceData* dcmtk_render_volume(int volume_id, double rotation_x_deg, double rotation_y_deg,
+                                  double window_center, double window_width,
+                                  const char* preset_name, int preview_mode);
+
 // === GSPS (Grayscale Softcopy Presentation State) ===
 // Create a GSPS DICOM file from annotation data on a source DICOM image.
 // annotations_json: JSON array of annotation objects (tool, points, text, color, strokeWidth).

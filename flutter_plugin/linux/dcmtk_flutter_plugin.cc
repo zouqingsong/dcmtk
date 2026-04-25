@@ -772,9 +772,9 @@ static void dcmtk_flutter_plugin_handle_method_call(
   // ===== buildMprVolume =====
   } else if (strcmp(method, "buildMprVolume") == 0) {
     auto filePaths = GetStringList(args, "filePaths");
-    if (filePaths.size() < 3) {
+    if (filePaths.size() < 1) {
       response = FL_METHOD_RESPONSE(fl_method_error_response_new(
-          "INVALID_ARGUMENT", "Need at least 3 file paths for MPR", nullptr));
+          "INVALID_ARGUMENT", "Need at least 1 file path for MPR", nullptr));
       fl_method_call_respond(method_call, response, nullptr);
       return;
     }
@@ -863,6 +863,40 @@ static void dcmtk_flutter_plugin_handle_method_call(
     fl_value_set_string_take(dict, "data",
         fl_value_new_uint8_list(mip->data, dataLen));
     dcmtk_free_mpr_slice_data(mip);
+    response = FL_METHOD_RESPONSE(fl_method_success_response_new(dict));
+
+  // ===== renderVolume =====
+  } else if (strcmp(method, "renderVolume") == 0) {
+    int volumeId = GetInt(args, "volumeId");
+    double rx = GetDouble(args, "rotationX", 0.0);
+    double ry = GetDouble(args, "rotationY", 0.0);
+    double wc = GetDouble(args, "windowCenter", 0.0);
+    double ww = GetDouble(args, "windowWidth", 0.0);
+    std::string preset = GetString(args, "preset");
+    if (preset.empty()) preset = "Muscle";
+    int previewMode = 0;
+    FlValue* previewVal = fl_value_lookup_string(args, "preview");
+    if (previewVal && fl_value_get_type(previewVal) == FL_VALUE_TYPE_BOOL) {
+      previewMode = fl_value_get_bool(previewVal) ? 1 : 0;
+    }
+
+    MprSliceData* volume = dcmtk_render_volume(volumeId, rx, ry, wc, ww, preset.c_str(), previewMode);
+    if (volume->error) {
+      std::string errMsg = SafeStr(volume->error_message);
+      dcmtk_free_mpr_slice_data(volume);
+      response = FL_METHOD_RESPONSE(fl_method_error_response_new(
+          "VOLUME_RENDER_ERROR", errMsg.empty() ? "Unknown volume rendering error" : errMsg.c_str(), nullptr));
+      fl_method_call_respond(method_call, response, nullptr);
+      return;
+    }
+
+    int dataLen = volume->width * volume->height * 4;
+    g_autoptr(FlValue) dict = fl_value_new_map();
+    fl_value_set_string_take(dict, "width", fl_value_new_int(volume->width));
+    fl_value_set_string_take(dict, "height", fl_value_new_int(volume->height));
+    fl_value_set_string_take(dict, "data",
+        fl_value_new_uint8_list(volume->data, dataLen));
+    dcmtk_free_mpr_slice_data(volume);
     response = FL_METHOD_RESPONSE(fl_method_success_response_new(dict));
 
   // ===== initDictionary =====

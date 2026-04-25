@@ -63,6 +63,7 @@ public class DcmtkFlutterPlugin implements FlutterPlugin, MethodCallHandler {
   private native HashMap<String, Object> nativeGetMprSlice(int volumeId, int plane, int sliceIndex, double windowCenter, double windowWidth);
   private native void nativeFreeMprVolume(int volumeId);
   private native HashMap<String, Object> nativeRenderMip(int volumeId, double rotationX, double rotationY, double windowCenter, double windowWidth);
+  private native HashMap<String, Object> nativeRenderVolume(int volumeId, double rotationX, double rotationY, double windowCenter, double windowWidth, String preset, boolean preview);
   private native HashMap<String, Object> nativeCreateGsps(String sourceDicomPath, String annotationsJson, String outputPath);
   private native String nativeParseGsps(String filePath);
   private native HashMap<String, Object> nativeConvertImageToDicom(String imagePath, String outputPath, String patientId, String patientName, String patientBirthDate, String studyDescription, String seriesDescription, String imageComments, String modality, String studyInstanceUID, String seriesInstanceUID, int instanceNumber);
@@ -210,6 +211,9 @@ public class DcmtkFlutterPlugin implements FlutterPlugin, MethodCallHandler {
         break;
       case "renderMip":
         handleRenderMip(call, result);
+        break;
+      case "renderVolume":
+        handleRenderVolume(call, result);
         break;
       case "createGsps":
         handleCreateGsps(call, result);
@@ -642,8 +646,8 @@ public class DcmtkFlutterPlugin implements FlutterPlugin, MethodCallHandler {
   @SuppressWarnings("unchecked")
   private void handleBuildMprVolume(MethodCall call, Result result) {
     List<String> filePaths = call.argument("filePaths");
-    if (filePaths == null || filePaths.size() < 3) {
-      result.error("INVALID_ARGUMENT", "Need at least 3 file paths for MPR", null);
+    if (filePaths == null || filePaths.size() < 1) {
+      result.error("INVALID_ARGUMENT", "Need at least 1 file path for MPR", null);
       return;
     }
     String[] pathsArray = filePaths.toArray(new String[0]);
@@ -720,6 +724,38 @@ public class DcmtkFlutterPlugin implements FlutterPlugin, MethodCallHandler {
           return;
         }
         result.success(mipResult);
+      });
+    }).start();
+  }
+
+  private void handleRenderVolume(MethodCall call, Result result) {
+    Number volumeId = call.argument("volumeId");
+    Number rotationX = call.argument("rotationX");
+    Number rotationY = call.argument("rotationY");
+    Number windowCenter = call.argument("windowCenter");
+    Number windowWidth = call.argument("windowWidth");
+    String preset = call.argument("preset");
+    Boolean preview = call.argument("preview");
+    if (volumeId == null) {
+      result.error("INVALID_ARGUMENT", "volumeId is required", null);
+      return;
+    }
+    int vid = volumeId.intValue();
+    double rx = rotationX != null ? rotationX.doubleValue() : 0;
+    double ry = rotationY != null ? rotationY.doubleValue() : 0;
+    double wc = windowCenter != null ? windowCenter.doubleValue() : 0;
+    double ww = windowWidth != null ? windowWidth.doubleValue() : 0;
+    String presetName = preset != null ? preset : "Muscle";
+    boolean previewMode = preview != null && preview;
+
+    new Thread(() -> {
+      HashMap<String, Object> volumeResult = nativeRenderVolume(vid, rx, ry, wc, ww, presetName, previewMode);
+      runOnMainThread(() -> {
+        if (volumeResult.containsKey("error")) {
+          result.error("VOLUME_RENDER_ERROR", (String) volumeResult.get("error"), null);
+          return;
+        }
+        result.success(volumeResult);
       });
     }).start();
   }

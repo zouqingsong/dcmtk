@@ -1090,6 +1090,52 @@ Java_com_dcmtk_flutter_DcmtkFlutterPlugin_nativeRenderMip(JNIEnv *env, jobject,
     return resultMap;
 }
 
+extern "C" JNIEXPORT jobject JNICALL
+Java_com_dcmtk_flutter_DcmtkFlutterPlugin_nativeRenderVolume(JNIEnv *env, jobject,
+        jint volumeId, jdouble rotationX, jdouble rotationY, jdouble windowCenter, jdouble windowWidth,
+        jstring preset, jboolean preview) {
+
+    const char* presetName = jstringToChar(env, preset);
+    MprSliceData* volume = dcmtk_render_volume(
+            volumeId,
+            rotationX,
+            rotationY,
+            windowCenter,
+            windowWidth,
+            presetName ? presetName : "Muscle",
+            preview ? 1 : 0);
+    releaseString(env, preset, presetName);
+
+    jclass hashMapClass = env->FindClass("java/util/HashMap");
+    jmethodID hashMapInit = env->GetMethodID(hashMapClass, "<init>", "()V");
+    jmethodID hashMapPut = env->GetMethodID(hashMapClass, "put",
+            "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;");
+    jobject resultMap = env->NewObject(hashMapClass, hashMapInit);
+
+    if (volume->error) {
+        env->CallObjectMethod(resultMap, hashMapPut, env->NewStringUTF("error"),
+                safeNewStringUTF(env, volume->error_message));
+        dcmtk_free_mpr_slice_data(volume);
+        return resultMap;
+    }
+
+    jclass integerClass = env->FindClass("java/lang/Integer");
+    jmethodID intValueOf = env->GetStaticMethodID(integerClass, "valueOf", "(I)Ljava/lang/Integer;");
+
+    int dataLen = volume->width * volume->height * 4;
+    jbyteArray byteArray = env->NewByteArray(dataLen);
+    env->SetByteArrayRegion(byteArray, 0, dataLen, (jbyte*)volume->data);
+
+    env->CallObjectMethod(resultMap, hashMapPut, env->NewStringUTF("data"), byteArray);
+    env->CallObjectMethod(resultMap, hashMapPut, env->NewStringUTF("width"),
+            env->CallStaticObjectMethod(integerClass, intValueOf, volume->width));
+    env->CallObjectMethod(resultMap, hashMapPut, env->NewStringUTF("height"),
+            env->CallStaticObjectMethod(integerClass, intValueOf, volume->height));
+
+    dcmtk_free_mpr_slice_data(volume);
+    return resultMap;
+}
+
 // ==================== GSPS ====================
 
 extern "C" JNIEXPORT jobject JNICALL

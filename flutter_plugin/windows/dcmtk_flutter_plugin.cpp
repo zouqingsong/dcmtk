@@ -759,8 +759,8 @@ void DcmtkFlutterPlugin::HandleMethodCall(
   // ===== buildMprVolume =====
   } else if (method == "buildMprVolume") {
     auto filePaths = GetStringList(*args, "filePaths");
-    if (filePaths.size() < 3) {
-      result->Error("INVALID_ARGUMENT", "Need at least 3 file paths for MPR");
+    if (filePaths.size() < 1) {
+      result->Error("INVALID_ARGUMENT", "Need at least 1 file path for MPR");
       return;
     }
 
@@ -842,6 +842,38 @@ void DcmtkFlutterPlugin::HandleMethodCall(
     dict[EncodableValue("height")] = EncodableValue(mip->height);
     dict[EncodableValue("data")] = EncodableValue(pixelData);
     dcmtk_free_mpr_slice_data(mip);
+    result->Success(EncodableValue(dict));
+
+  // ===== renderVolume =====
+  } else if (method == "renderVolume") {
+    int volumeId = GetInt(*args, "volumeId");
+    double rx = GetDouble(*args, "rotationX", 0.0);
+    double ry = GetDouble(*args, "rotationY", 0.0);
+    double wc = GetDouble(*args, "windowCenter", 0.0);
+    double ww = GetDouble(*args, "windowWidth", 0.0);
+    std::string preset = GetString(*args, "preset");
+    if (preset.empty()) preset = "Muscle";
+    int previewMode = 0;
+    auto previewIt = args->find(EncodableValue("preview"));
+    if (previewIt != args->end() && std::holds_alternative<bool>(previewIt->second)) {
+      previewMode = std::get<bool>(previewIt->second) ? 1 : 0;
+    }
+
+    MprSliceData* volume = dcmtk_render_volume(volumeId, rx, ry, wc, ww, preset.c_str(), previewMode);
+    if (volume->error) {
+      std::string errMsg = SafeStr(volume->error_message);
+      dcmtk_free_mpr_slice_data(volume);
+      result->Error("VOLUME_RENDER_ERROR", errMsg.empty() ? "Unknown volume rendering error" : errMsg);
+      return;
+    }
+
+    int dataLen = volume->width * volume->height * 4;
+    std::vector<uint8_t> pixelData(volume->data, volume->data + dataLen);
+    EncodableMap dict;
+    dict[EncodableValue("width")] = EncodableValue(volume->width);
+    dict[EncodableValue("height")] = EncodableValue(volume->height);
+    dict[EncodableValue("data")] = EncodableValue(pixelData);
+    dcmtk_free_mpr_slice_data(volume);
     result->Success(EncodableValue(dict));
 
   // ===== initDictionary =====
