@@ -1,0 +1,4 @@
+# Android Gradle / NDK build output — never commit
+bin/
+.cxx/
+build/
