@@ -12,7 +12,14 @@ set(WRAPPER_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../../../../ios/native")
 # Create the shared library
 add_library(dcmtk_flutter SHARED
     dcmtk_flutter_jni.cpp
+    android_privilege_shim.cpp
     ${WRAPPER_DIR}/dcmtk_flutter_wrapper.cpp)
+
+# Android 13+ seccomp can block setuid/setgid syscalls for app processes.
+# DCMTK may call these while opening an SCP listener; wrap them to no-op.
+target_link_options(dcmtk_flutter PRIVATE
+    "-Wl,--wrap=setuid"
+    "-Wl,--wrap=setgid")
 
 # Include paths: DCMTK headers + wrapper header
 target_include_directories(dcmtk_flutter PRIVATE

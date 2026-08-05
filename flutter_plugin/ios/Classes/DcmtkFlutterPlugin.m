@@ -1163,7 +1163,7 @@ extern "C" {
   } else if ([@"getStoreSCPStatus" isEqualToString:call.method]) {
     StoreSCPStatus* status = dcmtk_get_store_scp_status();
     NSDictionary *response = @{
-        @"running": @(status->running),
+        @"running": @((status->running != 0) ? YES : NO),
         @"port": @(status->port),
         @"receivedCount": @(status->received_count),
         @"storageDir": status->storage_dir ? [NSString stringWithUTF8String:status->storage_dir] : @"",

@@ -901,6 +901,9 @@ DicomQueryResult* dcmtk_query_patients(const char* server_host, int server_port,
         
         // Add Patient Root Query model for patient-level queries
         scu.addPresentationContext(UID_FINDPatientRootQueryRetrieveInformationModel, transferSyntaxes);
+        // Add Study Root Query model as a fallback for PACS that do not return
+        // patient-level matches reliably for Patient Root queries.
+        scu.addPresentationContext(UID_FINDStudyRootQueryRetrieveInformationModel, transferSyntaxes);
         
         DEBUG_LOG("Added presentation contexts: Verification, PatientRoot FIND");
         
@@ -960,13 +963,15 @@ DicomQueryResult* dcmtk_query_patients(const char* server_host, int server_port,
         // Query at PATIENT level to get patient records
         DcmDataset query;
         query.putAndInsertOFStringArray(DCM_QueryRetrieveLevel, "PATIENT");
-        query.putAndInsertOFStringArray(DCM_PatientID, "*");           // Wildcard: return all
+        // Keep PatientID as a return key (empty) rather than forcing wildcard.
+        // Some PACS stacks treat wildcard PatientID too strictly and return 0 matches.
+        query.putAndInsertOFStringArray(DCM_PatientID, "");
         // Apply server-side name filter if provided, otherwise wildcard
         if (patient_name_filter && strlen(patient_name_filter) > 0) {
             std::string filter = std::string("*") + patient_name_filter + "*";
             query.putAndInsertOFStringArray(DCM_PatientName, filter.c_str());
         } else {
-            query.putAndInsertOFStringArray(DCM_PatientName, "*");     // Wildcard: return all
+            query.putAndInsertOFStringArray(DCM_PatientName, "");
         }
         query.putAndInsertOFStringArray(DCM_PatientBirthDate, "");    // Return Birth Date
         query.putAndInsertOFStringArray(DCM_PatientSex, "");          // Return Sex
@@ -1073,11 +1078,18 @@ DicomQueryResult* dcmtk_query_patients(const char* server_host, int server_port,
                     DEBUG_LOG("Patient: ID='%s', Name='%s', BirthDate='%s', Sex='%s', Studies='%s'", 
                              patientID.c_str(), patientName.c_str(), birthDate.c_str(), sex.c_str(), numStudies.c_str());
                     
-                    // Since this is a patient-level query, each response is a unique patient
-                    if (!patientID.empty()) {
+                    // Since this is a patient-level query, each response is a unique patient.
+                    // Some servers may omit PatientID in certain responses; keep such entries
+                    // when PatientName is present to avoid returning an empty patient list.
+                    if (!patientID.empty() || !patientName.empty()) {
                         DicomPatient* patient = &result->patients[result->patient_count];
-                        
-                        patient->patient_id = strdup(patientID.c_str());
+
+                        if (!patientID.empty()) {
+                            patient->patient_id = strdup(patientID.c_str());
+                        } else {
+                            std::string fallbackId = "NO_ID_" + std::to_string(result->patient_count + 1);
+                            patient->patient_id = strdup(fallbackId.c_str());
+                        }
                         patient->patient_name = strdup(patientName.c_str());
                         patient->patient_birth_date = strdup(birthDate.c_str());
                         patient->patient_sex = strdup(sex.c_str());
@@ -1085,7 +1097,7 @@ DicomQueryResult* dcmtk_query_patients(const char* server_host, int server_port,
                         patient->number_of_patient_related_studies = strdup(numStudies.c_str());
                         
                         result->patient_count++;
-                        DEBUG_LOG("Added new patient: %s", patientID.c_str());
+                        DEBUG_LOG("Added patient: ID='%s' Name='%s'", patient->patient_id, patient->patient_name);
                     }
                 } else {
                     DEBUG_LOG("Warning: Received null response or dataset");
@@ -1094,6 +1106,86 @@ DicomQueryResult* dcmtk_query_patients(const char* server_host, int server_port,
             }
         }
         
+        // Fallback: Some servers answer Patient Root but return no matches.
+        // Retry with Study Root at STUDY level and derive unique patient rows.
+        if (result->patient_count == 0) {
+            DEBUG_LOG("Patient Root returned 0 patients, trying Study Root fallback...");
+
+            T_ASC_PresentationContextID studyPresID =
+                scu.findPresentationContextID(UID_FINDStudyRootQueryRetrieveInformationModel, "");
+
+            if (studyPresID != 0 && scu.isConnected()) {
+                DcmDataset studyQuery;
+                studyQuery.putAndInsertOFStringArray(DCM_QueryRetrieveLevel, "STUDY");
+                studyQuery.putAndInsertOFStringArray(DCM_StudyInstanceUID, "");
+                studyQuery.putAndInsertOFStringArray(DCM_PatientID, "");
+                if (patient_name_filter && strlen(patient_name_filter) > 0) {
+                    std::string filter = std::string("*") + patient_name_filter + "*";
+                    studyQuery.putAndInsertOFStringArray(DCM_PatientName, filter.c_str());
+                } else {
+                    studyQuery.putAndInsertOFStringArray(DCM_PatientName, "");
+                }
+                studyQuery.putAndInsertOFStringArray(DCM_PatientBirthDate, "");
+                studyQuery.putAndInsertOFStringArray(DCM_PatientSex, "");
+                studyQuery.putAndInsertOFStringArray(DCM_NumberOfPatientRelatedStudies, "");
+
+                OFList<QRResponse*> studyResponses;
+                OFCondition studyStatus = scu.sendFINDRequest(studyPresID, &studyQuery, &studyResponses);
+                DEBUG_LOG("Study Root C-FIND status: %s (code: %u), responses=%zu",
+                         studyStatus.text(), studyStatus.code(), studyResponses.size());
+
+                if (studyStatus.good() && !studyResponses.empty()) {
+                    if (result->patients) {
+                        free(result->patients);
+                        result->patients = nullptr;
+                    }
+                    result->patients = (DicomPatient*)malloc(studyResponses.size() * sizeof(DicomPatient));
+                    result->patient_count = 0;
+
+                    std::map<std::string, bool> seen;
+                    OFListIterator(QRResponse*) sit = studyResponses.begin();
+                    OFListIterator(QRResponse*) slast = studyResponses.end();
+                    while (sit != slast) {
+                        QRResponse* response = *sit;
+                        if (response && response->m_dataset) {
+                            OFString patientID, patientName, birthDate, sex, numStudies;
+                            response->m_dataset->findAndGetOFString(DCM_PatientID, patientID);
+                            response->m_dataset->findAndGetOFString(DCM_PatientName, patientName);
+                            response->m_dataset->findAndGetOFString(DCM_PatientBirthDate, birthDate);
+                            response->m_dataset->findAndGetOFString(DCM_PatientSex, sex);
+                            response->m_dataset->findAndGetOFString(DCM_NumberOfPatientRelatedStudies, numStudies);
+
+                            if (!patientID.empty() || !patientName.empty()) {
+                                std::string key = !patientID.empty()
+                                    ? patientID.c_str()
+                                    : (std::string("NAME:") + patientName.c_str());
+                                if (!seen[key]) {
+                                    seen[key] = true;
+                                    DicomPatient* patient = &result->patients[result->patient_count];
+                                    if (!patientID.empty()) {
+                                        patient->patient_id = strdup(patientID.c_str());
+                                    } else {
+                                        std::string fallbackId = "NO_ID_" + std::to_string(result->patient_count + 1);
+                                        patient->patient_id = strdup(fallbackId.c_str());
+                                    }
+                                    patient->patient_name = strdup(patientName.c_str());
+                                    patient->patient_birth_date = strdup(birthDate.c_str());
+                                    patient->patient_sex = strdup(sex.c_str());
+                                    patient->study_count = 0;
+                                    patient->number_of_patient_related_studies = strdup(numStudies.c_str());
+                                    result->patient_count++;
+                                }
+                            }
+                        }
+                        ++sit;
+                    }
+                    DEBUG_LOG("Study Root fallback produced %d unique patients", result->patient_count);
+                }
+            } else {
+                DEBUG_LOG("Study Root presentation context not available or association closed");
+            }
+        }
+
         scu.releaseAssociation();
         DEBUG_LOG("Successfully retrieved %d patients", result->patient_count);
         
