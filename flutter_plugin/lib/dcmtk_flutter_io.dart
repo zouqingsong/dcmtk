@@ -18,14 +18,11 @@ class DcmtkFlutter {
   late _LoadDicomFile? _loadDicomFile;
   late _FreeString? _freeString;
   
-  /// Method channel (for all supported mobile/desktop platforms)
+  // Method channel (for iOS and macOS)
   static const MethodChannel _methodChannel = MethodChannel('dcmtk_flutter');
 
-  /// Whether the current platform uses MethodChannel.
-  ///
-  /// Android also uses MethodChannel for most APIs (including C-FIND/C-STORE SCP).
-  bool get _useMethodChannel =>
-      Platform.isAndroid || Platform.isIOS || Platform.isMacOS || Platform.isWindows || Platform.isLinux;
+  /// Whether the current platform uses MethodChannel (iOS/macOS/Windows/Linux)
+  bool get _useMethodChannel => Platform.isIOS || Platform.isMacOS || Platform.isWindows || Platform.isLinux;
 
   DcmtkFlutter._internal() {
     if (Platform.isAndroid) {
