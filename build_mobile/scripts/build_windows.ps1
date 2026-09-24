@@ -14,7 +14,9 @@
 param(
     [string]$Generator = "Visual Studio 17 2022",
     [switch]$WithOpenSSL,
-    [string]$OpenSSLRoot = ""
+    [string]$OpenSSLRoot = "",
+    [string]$GeneratorInstance = "",
+    [string]$CMakePath = "cmake"
 )
 
 $ErrorActionPreference = "Stop"
@@ -89,14 +91,17 @@ if ($WithOpenSSL -and $OpenSSLRoot) {
 } else {
     $cmakeArgs += "-DDCMTK_WITH_OPENSSL=OFF"
 }
+if ($GeneratorInstance) {
+    $cmakeArgs += "-DCMAKE_GENERATOR_INSTANCE=$GeneratorInstance"
+}
 
-& cmake @cmakeArgs
+& $CMakePath @cmakeArgs
 if ($LASTEXITCODE -ne 0) { throw "CMake configure failed" }
 
 # CMake build (both Release and Debug)
 foreach ($bt in $BuildTypes) {
     Write-Host "`n=== CMake Build ($bt) ===" -ForegroundColor Cyan
-    & cmake --build $BuildDir --config $bt --parallel
+    & $CMakePath --build $BuildDir --config $bt --parallel
     if ($LASTEXITCODE -ne 0) { throw "CMake build ($bt) failed" }
 }
 
