@@ -7,7 +7,7 @@ DCMTK (DICOM toolkit) Flutter plugin providing access to DICOM file processing c
                        DESC
   s.homepage         = 'https://github.com/zouqingsong/dcmtk'
   s.license          = { :file => '../LICENSE' }
-  s.author           = { 'DOI Technology' => 'info@doitech.com' }
+  s.author           = { 'Doitech International' => 'info@doitech.com' }
   s.source           = { :path => '.' }
 
   s.source_files = 'Classes/**/*', 'native/dcmtk_flutter_wrapper.h', 'native/dcmtk_flutter_wrapper.cpp'
