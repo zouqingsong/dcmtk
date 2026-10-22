@@ -9,13 +9,16 @@ Syncs the DCMTK C++ source (not build/, not other platforms' prebuilt libs) to
 C:/Projects/dcmtk and runs build_mobile/scripts/build_windows.ps1 there,
 producing flutter_plugin/windows/{Headers,Libs}. Uses exported WINDOWS_IP and
 WINDOWS_USER by default.
+Quote Windows usernames to preserve backslashes and spaces, e.g. 'AP\first last'.
 EOF
 }
 [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]] && { usage; exit 0; }
 win_ip="${1:-${WINDOWS_IP:-}}"
 win_user="${2:-${WINDOWS_USER:-}}"
 [[ -n "$win_ip" && -n "$win_user" ]] || { echo 'Export WINDOWS_IP and WINDOWS_USER first (source ~/.zshrc).' >&2; exit 2; }
-[[ "$win_ip" =~ ^[a-zA-Z0-9._:-]+$ && "$win_user" =~ ^[a-zA-Z0-9._@-]+$ ]] || { echo 'Invalid SSH host/user.' >&2; exit 2; }
+# Windows domain-qualified account names may contain backslashes and spaces.
+user_pattern='^[a-zA-Z0-9._@\\ -]+$'
+[[ "$win_ip" =~ ^[a-zA-Z0-9._:-]+$ && "$win_user" =~ $user_pattern ]] || { echo 'Invalid SSH host/user.' >&2; exit 2; }
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$root"
 target="$win_user@$win_ip"
